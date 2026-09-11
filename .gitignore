@@ -1,0 +1,17 @@
+# Build artifacts
+*.o
+udp_filter
+udp_filter_skel.h
+
+# Python
+__pycache__/
+*.pyc
+
+# Runtime logs
+results/alerts.log
+
+# Editor / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
