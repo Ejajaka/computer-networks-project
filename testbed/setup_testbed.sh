@@ -35,6 +35,9 @@ done
 wait
 echo "    base tools installed"
 
+echo "==> Installing iptables (for the controller's block rule) in victim"
+docker exec victim bash -c 'apt-get install -y -qq iptables >/dev/null 2>&1'
+
 echo "==> Installing hping3 in attacker only"
 docker exec attacker bash -c 'apt-get install -y -qq hping3 >/dev/null 2>&1' &
 wait

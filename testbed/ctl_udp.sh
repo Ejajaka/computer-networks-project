@@ -3,7 +3,13 @@
 # usage: ctl_udp.sh <on|off>
 set -euo pipefail
 ACTION="${1:-on}"
-BPF="/usr/lib/linux-tools/5.15.0-190-generic/bpftool"
+
+# Find bpftool regardless of linux-tools version installed in the container
+find_bpf() {
+  docker exec victim bash -c \
+    'B=$(ls /usr/lib/linux-tools/*/bpftool 2>/dev/null | head -1); [ -n "$B" ] && echo "$B" || echo bpftool'
+}
+BPF="$(find_bpf)"
 
 if [ "$ACTION" = "on" ]; then
   docker exec victim bash -c "

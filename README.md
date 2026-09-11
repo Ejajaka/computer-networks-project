@@ -80,6 +80,13 @@ results/
 
 ## 4. Quick way to run it
 
+**Easiest — one command does everything:**
+```bash
+make -C ebpf                     # build the filters (first time only)
+sudo bash testbed/demo.sh        # builds network, attaches filter, runs attacks, prints results
+```
+
+**Manual, step by step:**
 ```bash
 # 1. build the filters
 cd ~/Desktop/CN/ebpf && make
@@ -90,7 +97,7 @@ cd ~/Desktop/CN/testbed && sudo bash setup_testbed.sh
 # 3. put the combined filter on the victim
 sudo docker cp ~/Desktop/CN/ebpf/ddos_filter_kern.o victim:/tmp/ddos_filter_kern.o
 sudo docker exec victim bash -c '
-  BPF=/usr/lib/linux-tools/5.15.0-190-generic/bpftool
+  BPF=$(ls /usr/lib/linux-tools/*/bpftool 2>/dev/null | head -1)
   rm -rf /sys/fs/bpf/ddos
   $BPF prog loadall /tmp/ddos_filter_kern.o /sys/fs/bpf/ddos
   ip link set dev eth0 xdp pinned /sys/fs/bpf/ddos/xdp'
@@ -102,7 +109,7 @@ cd ~/Desktop/CN/testbed && sudo bash start_controller.sh
 for i in 1 2 3 4; do sudo docker exec -d attacker hping3 -2 -p 5201 --flood 172.30.0.10; done
 
 # 6. read the drop counters
-sudo docker exec victim bash -c '/usr/lib/linux-tools/5.15.0-190-generic/bpftool map dump name stats_map'
+sudo docker exec victim bash -c '$(ls /usr/lib/linux-tools/*/bpftool 2>/dev/null | head -1) map dump name stats_map'
 ```
 
 ---
