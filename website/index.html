@@ -1,0 +1,1349 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>eBPF/XDP Real-Time DDoS Detection &amp; Mitigation — Complete Project Guide</title>
+<meta name="description" content="A complete, beginner-friendly guide to the eBPF/XDP DDoS mitigation project: the paper we reproduced (Tolay et al. 2025), the SYN-flood features we added, the code, the testbed, the results, and how to run it." />
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+<div class="progress" id="progress"></div>
+<button class="burger-btn" id="burger" aria-label="Toggle navigation">☰</button>
+
+<div class="wrapper">
+
+  <!-- ======================= SIDEBAR ======================= -->
+  <aside class="sidebar" id="sidebar">
+    <div class="brand">
+      <span class="logo">🛡️</span>
+      <span>eBPF • XDP • DDoS<br /><span class="small">CN Project — Complete Guide</span></span>
+    </div>
+
+    <div class="nav-group">Getting started</div>
+    <nav>
+      <a href="#home">🏠 Home &amp; Overview</a>
+      <a href="#problem">🌪️ 1 &nbsp;The Problem</a>
+      <a href="#concepts">🧠 2 &nbsp;Background Concepts</a>
+      <a href="#paper">📄 3 &nbsp;The Paper</a>
+    </nav>
+
+    <div class="nav-group">Our implementation</div>
+    <nav>
+      <a href="#our-project">🛠️ 4 &nbsp;What We Did</a>
+      <a href="#code">💻 5 &nbsp;Code Deep Dive</a>
+      <a href="#algorithm">⏱️ 6 &nbsp;Detection Algorithm</a>
+      <a href="#testbed">🧪 7 &nbsp;The Testbed</a>
+    </nav>
+
+    <div class="nav-group">Results &amp; analysis</div>
+    <nav>
+      <a href="#results">📊 8 &nbsp;Results</a>
+      <a href="#comparison">⚖️ 9 &nbsp;Paper vs. Ours</a>
+      <a href="#limits">⚠️ 10 &nbsp;Limitations</a>
+      <a href="#future">🔮 11 &nbsp;Future Work</a>
+    </nav>
+
+    <div class="nav-group">Do it yourself</div>
+    <nav>
+      <a href="#howto">🚀 12 &nbsp;How To Run It</a>
+      <a href="#references">📚 13 &nbsp;References &amp; Credits</a>
+    </nav>
+
+    <div class="foot">
+      Based on the paper <i>eBPF-Based Real-Time DDoS Mitigation for IoT Edge Devices</i> (Tolay, 2025) ·
+      arXiv:2508.00851
+    </div>
+  </aside>
+
+  <!-- ======================= CONTENT ======================= -->
+  <main class="content">
+
+    <!-- ===================== HOME ===================== -->
+    <section id="home" class="hero">
+      <span class="kicker">Computer Networks Project · CN • Semester 5</span>
+      <h1>Real-Time DDoS Detection &amp; Mitigation with eBPF and XDP</h1>
+      <p class="sub">
+        This website explains our <b>entire project</b>, from the very first concept to the final measured
+        result. We <b>reproduced a published research paper</b> — an eBPF/XDP defense that stops DDoS
+        floods inside the Linux kernel — and then <b>added our own features</b>: protection against
+        <b>SYN floods</b> and a <b>single combined program</b> that fights UDP and SYN floods at the same time.
+        Everything here is explained in simple words, with analogies, diagrams, and real numbers.
+      </p>
+      <div class="badges">
+        <span class="badge">📄 Paper: <b>Tolay 2025</b> · arXiv:2508.00851</span>
+        <span class="badge">UDP drop: <b>99.7%</b></span>
+        <span class="badge">SYN drop (ours): <b>99.9%</b></span>
+        <span class="badge">Combined: <b>99.8%</b></span>
+        <span class="badge">Legit traffic: <b>0% dropped</b></span>
+      </div>
+      <p class="small" style="margin-top:18px">
+        Quick tour: <a href="#problem">the problem</a> → <a href="#concepts">key ideas</a> →
+        <a href="#paper">the paper</a> → <a href="#our-project">what we added</a> →
+        <a href="#code">the code</a> → <a href="#results">the results</a>.
+      </p>
+    </section>
+
+    <!-- ===================== 1. THE PROBLEM ===================== -->
+    <section id="problem">
+      <h2><span class="num">1</span> The Problem</h2>
+      <p class="lead">
+        The Internet of Things (IoT) is a gold mine for attackers. Billions of small, cheap, often insecure
+        devices are being turned into an army of zombie machines that attack the rest of the internet.
+      </p>
+
+      <h3>1.1 What is IoT?</h3>
+      <p>
+        <b>IoT (Internet of Things)</b> = everyday devices that connect to the internet: smart cameras,
+        routers, doorbells, sensors, printers, fitness trackers. There are projected to be more than
+        <b>75&nbsp;billion</b> of them. Most are built to be <b>cheap</b>, not <b>secure</b> — they have
+        little memory, a weak CPU, and often ship with default passwords.
+      </p>
+
+      <h3>1.2 What is a DDoS attack?</h3>
+      <p>
+        <b>DDoS = Distributed Denial of Service.</b> It means: <i>"many computers send so much junk at one
+        target that the target can't do its real job anymore."</i> It's like a thousand people crowding a
+        single shop entrance — no real customer can get in.
+      </p>
+      <div class="callout danger">
+        <p class="tag"><span>The classic example — the Mirai botnet (2016)</span></p>
+        <p>
+          An attacker hacked hundreds of thousands of IoT cameras and routers, turned them into an
+          <b>army of bots</b>, and used them to flood websites with massive traffic. Huge parts of the
+          internet went down. This proved that weak IoT devices are a serious global weapon.
+        </p>
+      </div>
+      <p>
+        Attacks keep growing: peak attacks now reach several <b>terabits per second</b> (a terabit =
+        1000 gigabits). Defending against this is hard, especially on the same weak devices being attacked.
+      </p>
+
+      <h3>1.3 Two attacks this project fights</h3>
+      <div class="cards">
+        <div class="card">
+          <div class="icon">🌊</div>
+          <h4>UDP flood</h4>
+          <p>
+            The attacker blasts a huge number of <b>UDP packets</b> at the victim. UDP is the "fire and
+            forget" internet protocol — no handshake needed — so it is trivially easy to flood with.
+            The victim chokes on useless packets.
+          </p>
+        </div>
+        <div class="card">
+          <div class="icon">🤝</div>
+          <h4>SYN flood</h4>
+          <p>
+            The attacker sends a flood of <b>TCP "new connection" packets (SYN)</b> but never finishes the
+            handshake. The victim keeps reserving memory for half-open connections until it runs out and
+            can no longer accept <i>any</i> real connection.
+          </p>
+        </div>
+      </div>
+      <p class="small">
+        Both are <b>volumetric</b> attacks — their weapon is <b>sheer quantity</b>, not clever content.
+      </p>
+
+      <h3>1.4 Why normal firewalls fail</h3>
+      <p>
+        A normal firewall (like <b>iptables</b> on Linux) is a <i>"gatekeeper in the middle of the building"</i>.
+        It can stop bad guys — but <b>only after the mail room has already opened every letter</b>.
+      </p>
+      <p>
+        Here is the journey of a packet on a normal Linux computer:
+      </p>
+      <div class="flow">
+        <div class="flow-row"><div class="node">📡 Network card (NIC) receives the packet</div></div>
+        <div class="arrow-down">▼</div>
+        <div class="flow-row"><div class="node">💾 Kernel allocates memory for it — <span class="inline-code">sk_buff</span></div></div>
+        <div class="arrow-down">▼</div>
+        <div class="flow-row"><div class="node">🛂 Firewall (iptables / netfilter) finally sees it</div></div>
+        <div class="arrow-down">▼</div>
+        <div class="flow-row"><div class="node">🖥️ Application receives it</div></div>
+      </div>
+      <div class="callout warn">
+        <p class="tag"><span>The killer detail</span></p>
+        <p>
+          By the time iptables sees a packet, the kernel has <b>already spent memory and CPU</b> on it.
+          Under a flood, the victim burns all its resources <i>before the firewall ever gets a chance to
+          drop anything</i>. The machine becomes unresponsive — the attack "wins."
+        </p>
+      </div>
+      <p>
+        So we need a guard <b>at the very front door</b> — on the network card itself, before any memory is
+        wasted. That is exactly what <b>XDP + eBPF</b> let us do (next section). 💡
+      </p>
+    </section>
+
+    <!-- ===================== 2. CONCEPTS ===================== -->
+    <section id="concepts">
+      <h2><span class="num">2</span> Background Concepts</h2>
+      <p class="lead">
+        To understand the project you only need three ideas: <b>eBPF</b> (safe code inside the kernel),
+        <b>XDP</b> (the earliest possible spot to run it), and <b>maps</b> (shared memory the kernel program
+        can use). Let's build them up one at a time.
+      </p>
+
+      <h3>2.1 The kernel and two "worlds"</h3>
+      <p>
+        Every operating system has a <b>kernel</b> — the core program that controls hardware. Everything
+        else runs "outside" the kernel in <b>user space</b>.
+      </p>
+      <ul>
+        <li><b>Kernel space:</b> fastest, can touch hardware, but a crash here = whole computer crashes.</li>
+        <li><b>User space:</b> safe and flexible (your apps), but communication with hardware costs time.</li>
+      </ul>
+      <p>
+        Normally, custom network logic lives in user space — safe but slow. Getting kernel speed has
+        traditionally meant writing a kernel <b>module</b>… which is dangerous (one bug = crash) and hard to
+        distribute. eBPF changes this completely.
+      </p>
+
+      <h3>2.2 eBPF — "safe programmable kernel code"</h3>
+      <p>
+        <b>eBPF (extended Berkeley Packet Filter)</b> is a Linux technology that lets <b>anyone write a small
+        program and safely run it inside the kernel</b>, without ever crashing the machine.
+      </p>
+      <div class="callout good">
+        <p class="tag"><span>Why is it safe? — The Verifier</span></p>
+        <p>
+          Before eBPF code is allowed to run, the kernel runs a strict checker called the <b>verifier</b>.
+          It proves the program: (1) runs in bounded time — <b>no infinite loops</b>, (2) never reads past
+          the end of a packet — <b>no out-of-bounds access</b>, (3) exits in a finite number of steps, and
+          (4) only calls allowed helper functions. If any check fails, the program is <b>rejected</b>.
+          This same safety check is why our whole project only needs to compile once with <span class="inline-code">clang</span>
+          — if the verifier accepts it, it can't hurt the system.
+        </p>
+      </div>
+      <p>Analogy: eBPF is like a vending machine that only accepts money and gives exact snacks — it <i>physically cannot</i> be tricked into doing anything else, because every possible action was pre-approved.</p>
+      <p>
+        eBPF programs run at <b>hook points</b> — places inside the kernel where the program is "plugged in".
+        We use the hook called <b>XDP</b>.
+      </p>
+
+      <h3>2.3 XDP — the front door of the network card</h3>
+      <p>
+        <b>XDP (eXpress Data Path)</b> is an eBPF hook that runs <b>in the network driver</b>, the instant a
+        packet arrives on the network card — <b>before</b> the kernel allocates any memory (<span class="inline-code">sk_buff</span>)
+        for it. It is the earliest possible point to make a decision.
+      </p>
+      <p>An XDP program returns one of a few "verdicts":</p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Verdict</th><th>Meaning</th><th>Used for</th></tr></thead>
+          <tbody>
+            <tr><td><span class="inline-code">XDP_PASS</span></td><td>Let the packet continue to the normal kernel stack</td><td>Good / normal traffic</td></tr>
+            <tr><td><span class="inline-code">XDP_DROP</span></td><td>Throw the packet away immediately</td><td>Attack packets — the fastest possible block</td></tr>
+            <tr><td><span class="inline-code">XDP_TX</span> / <span class="inline-code">XDP_REDIRECT</span></td><td>Send the packet back out / forward it</td><td>Advanced tricks (not needed here)</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>
+        So with XDP: <b>bad packet → dropped in microseconds at the front door</b>, zero memory wasted. That
+        is the "superpower" of this whole project. 🦸
+      </p>
+
+      <h3>2.4 eBPF maps — shared memory</h3>
+      <p>
+        An eBPF program often needs to <i>remember</i> things between packets. It uses <b>maps</b> — special
+        key–value storage that both the kernel program and user-space programs can read and write.
+      </p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Map type</th><th>What it is</th><th>Why we use it</th></tr></thead>
+          <tbody>
+            <tr>
+              <td><span class="inline-code">BPF_MAP_TYPE_LRU_HASH</span></td>
+              <td>A hash table that automatically forgets the least-recently-used entries when full</td>
+              <td>Remember each sender's packet/SYN count, keyed by source IP — no manual cleanup needed</td>
+            </tr>
+            <tr>
+              <td><span class="inline-code">BPF_MAP_TYPE_PERCPU_ARRAY</span></td>
+              <td>A tiny fixed-size array, one copy <b>per CPU core</b></td>
+              <td>Counters (total/dropped/alerts) written by many cores at once — no lock contention, blazing fast</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <p>
+        Our kernel program uses a <b><span class="inline-code">rate_map</span>/<span class="inline-code">syn_map</span></b>
+        (LRU hash, key = source IP) to track senders, and a <b><span class="inline-code">stats_map</span></b>
+        (per-CPU array) to count how many packets were seen, dropped, and alerted. The tool
+        <span class="inline-code">bpftool map dump</span> lets us read those numbers afterwards to get our results.
+      </p>
+
+      <h3>2.5 The two halves of the system</h3>
+      <p>The whole design is <b>hybrid</b> — it deliberately splits the work:</p>
+      <div class="cards">
+        <div class="card">
+          <div class="icon">⚡</div>
+          <h4>In the kernel (eBPF/XDP) — the fast half</h4>
+          <p>
+            Look at every packet at the front door, track senders, and <b>instantly drop</b> anything above
+            the rate limit. Uses almost no memory because nothing heavy is ever allocated.
+          </p>
+        </div>
+        <div class="card">
+          <div class="icon">🧩</div>
+          <h4>Outside the kernel (controller.py) — the flexible half</h4>
+          <p>
+            A normal Python program reads the kernel's alert messages, <b>permanently blocks the attacker's
+            IP</b> with a firewall rule, and logs everything. This part is easy to extend (send an email,
+            a Telegram message, etc.).
+          </p>
+        </div>
+      </div>
+      <div class="callout good">
+        <p class="tag"><span>Why split it?</span></p>
+        <p>
+          Dropping packets needs raw speed → do it in the kernel. Deciding policy, notifying people, keeping
+          records → do it in user space where it's easy to change. Best of both worlds. 🌍
+        </p>
+      </div>
+    </section>
+
+    <!-- ===================== 3. THE PAPER ===================== -->
+    <section id="paper">
+      <h2><span class="num">3</span> The Paper We Reproduced</h2>
+      <p class="lead">
+        <b>"eBPF-Based Real-Time DDoS Mitigation for IoT Edge Devices"</b> — Abdurrahman Tolay,
+        Istinye University, İstanbul, Türkiye. July 2025. Preprint on arXiv: <b>2508.00851</b>.
+      </p>
+
+      <h3>3.1 The paper's idea, in one sentence</h3>
+      <p>
+        Put a smart guard on the <b>network card itself</b> (via eBPF + XDP) that notices when any one
+        sender is flooding too fast, and <b>discards that sender's packets before they consume any resources</b>.
+      </p>
+
+      <h3>3.2 Threat model (what the paper assumes)</h3>
+      <ul>
+        <li>An attacker has <b>compromised one or more IoT devices</b> on a network (they become "bots").</li>
+        <li>The bots launch a <b>volumetric DDoS</b> — typically a <b>UDP flood</b>, and also mentions
+          <b>TCP SYN floods</b> — at a target.</li>
+        <li>The attack appears as an <b>abnormally high packet rate</b> from each bot's IP address.</li>
+      </ul>
+      <p class="small">
+        "Volumetric" = "bigness attack". The attacker wins by overwhelming quantity, so a
+        <i>how-fast-is-this-sender-going</i> counter is the perfect detector.
+      </p>
+
+      <h3>3.3 System architecture (paper)</h3>
+      <div class="flow">
+        <div class="flow-row"><div class="node attacker">🤖 Bot / Attacker<b>sends flood</b><span class="ip">(compromised IoT device)</span></div></div>
+        <div class="arrow-down">▼</div>
+        <div class="flow-row"><div class="node victim">🖥️ Victim — IoT edge device<b>network card → XDP hook</b></div></div>
+        <div class="arrow-down">▼</div>
+        <div class="flow-row"><div class="node filter">🧬 eBPF program (in kernel)<b>Rate detection + XDP_DROP</b></div></div>
+        <div class="arrow-down">▼</div>
+        <div class="flow-row">
+          <div class="node controller">🧩 User-space controller (Python)<b>reads alerts → iptables block → notify</b></div>
+        </div>
+      </div>
+      <p class="small">The crucial placement: the eBPF program sits at the XDP hook — <b>before</b> the kernel builds an <span class="inline-code">sk_buff</span> for each packet (see §2.3).</p>
+
+      <h3>3.4 Detection logic (paper)</h3>
+      <p>The eBPF program implements a <b>per-source-IP, rate-based</b> detector:</p>
+      <ol>
+        <li><b>Parse</b> the Ethernet and IP headers to find the <b>source IP</b> of each packet.</li>
+        <li><b>Count</b> in an eBPF <b>hash map</b>: key = source IP, value = packet count.</li>
+        <li><b>Compare</b> the count to a <b>threshold within a time window</b> (e.g. 800 packets/second).</li>
+        <li><b>Alert</b>: if the threshold is breached, print an alert (with the attacker IP) to the kernel
+          trace pipe via <span class="inline-code">bpf_trace_printk()</span>.</li>
+      </ol>
+
+      <h3>3.5 Mitigation logic (paper)</h3>
+      <ol>
+        <li><b>Immediate drop:</b> Once an IP is flagged, its packets are dropped immediately by returning
+          <span class="inline-code">XDP_DROP</span> — the fastest possible defense.</li>
+        <li><b>User-space block:</b> A Python controller watches the trace pipe; on an alert it inserts an
+          <b>iptables/nftables rule</b> to block the IP persistently, and can even <b>notify an admin via Telegram</b>.</li>
+      </ol>
+
+      <h3>3.6 How the paper tested it</h3>
+      <div class="cards">
+        <div class="card">
+          <div class="icon">🐳</div>
+          <h4>Docker simulation</h4>
+          <p>
+            A fake IoT network in Docker: a victim container, an attacker container running
+            <span class="inline-code">hping3</span>, and a benign client. Attack speed ≈ <b>100,000 packets/s
+            (~100 Mbps)</b>. Measured drop rate, CPU, and ping latency with the filter on vs. off.
+          </p>
+        </div>
+        <div class="card">
+          <div class="icon">🍓</div>
+          <h4>Physical Raspberry Pi 4</h4>
+          <p>
+            A real Pi 4 (4 GB RAM, Linux 5.15) as the victim, a laptop attacking over LAN with
+            <span class="inline-code">iperf3</span> at up to <b>100 Mbps (~30,000 pps)</b>. NIC offloads
+            (GRO/LRO) disabled for accurate counting.
+          </p>
+        </div>
+      </div>
+
+      <h3>3.7 Paper's key results</h3>
+      <div class="kpis">
+        <div class="kpi"><div class="label">Docker: packets dropped</div><div class="value">~99%</div><div class="note">at ~100k pps</div></div>
+        <div class="kpi"><div class="label">Raspberry Pi: packets dropped</div><div class="value sky">&gt;97%</div><div class="note">at 100 Mbps (~30k pps)</div></div>
+        <div class="kpi"><div class="label">CPU for filtering (Docker)</div><div class="value">~12%</div><div class="note">vs ~45% without the filter</div></div>
+        <div class="kpi"><div class="label">CPU on Pi</div><div class="value red">~85% of 1 core</div><div class="note">a "processing shield" — other cores free</div></div>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Metric</th><th>Docker simulation</th><th>Raspberry Pi 4 hardware</th></tr></thead>
+          <tbody>
+            <tr><td>Attack rate tested</td><td>~100k pps</td><td>100 Mbps (~30k pps)</td></tr>
+            <tr><td>Malicious packets dropped</td><td class="best">~99%</td><td class="best">&gt;97%</td></tr>
+            <tr><td>Device responsiveness (mitigated)</td><td>Fully responsive</td><td>Fully responsive</td></tr>
+            <tr><td>CPU used for filtering</td><td>~12% of host CPU</td><td>~85% of one core</td></tr>
+            <tr><td>Impact on legitimate traffic</td><td>Negligible</td><td>Minimal</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="callout good">
+        <p class="tag"><span>The elegant "processing shield" insight</span></p>
+        <p>
+          On the Pi, one CPU core went up to ~85% during a mitigated attack — but that was almost entirely
+          the kernel process (<span class="inline-code">ksoftirqd</span>) handling interrupts and running the
+          XDP program. That one core <i>absorbed the whole flood</i>, protecting the other cores and the
+          applications. The device "fails operational" instead of failing completely.
+        </p>
+      </div>
+      <h3>3.8 Paper's limitations (that we're careful about)</h3>
+      <ul>
+        <li><b>Blind to content:</b> it only measures rate, so it can't see malicious content inside encrypted packets, and can't catch "low-and-slow" attacks that fly under the rate limit.</li>
+        <li><b>Fixed thresholds:</b> the limits are hard-coded numbers (see §10).</li>
+        <li><b>Kernel requirements:</b> needs a modern Linux kernel with eBPF/XDP support.</li>
+      </ul>
+      <p class="small">
+        ▶ Full text of the paper is in this repository: <span class="inline-code">tolay2025_ebpf_ddos_iot.pdf</span> / <span class="inline-code">paper.txt</span>.
+      </p>
+    </section>
+
+    <!-- ===================== 4. OUR PROJECT ===================== -->
+    <section id="our-project">
+      <h2><span class="num">4</span> Our Project — What We Did</h2>
+      <p class="lead">
+        We treated the paper as a <b>blueprint</b>: we reproduced its UDP-flood defense end-to-end, then
+        <b>improved it</b> by adding SYN-flood protection and merging both into one program. Here is the
+        exact story.
+      </p>
+
+      <h3>4.1 What we reproduced (the paper's part)</h3>
+      <div class="cards">
+        <div class="card">
+          <div class="icon">🌊</div>
+          <h4>Docker-based UDP flood protection</h4>
+          <p>
+            A UDP flood (≈100 Mbps) against a victim container. An eBPF/XDP program in the victim detects a
+            sender exceeding <b>800 packets/second</b> and drops its packets at the network card. We measured
+            a <b>99.7% drop rate</b> — matching (and slightly beating) the paper's ~99%.
+          </p>
+        </div>
+        <div class="card">
+          <div class="icon">🔗</div>
+          <h4>Hybrid kernel + user-space controller</h4>
+          <p>
+            Same design as the paper: kernel program drops at the NIC, a Python controller
+            (<span class="inline-code">controller.py</span>) reads the alerts, adds an
+            <b>iptables block</b> for the attacker IP, and logs events to <span class="inline-code">alerts.log</span>.
+          </p>
+        </div>
+      </div>
+
+      <h3>4.2 What we added (our new features) — the important part</h3>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Feature</th><th>In the paper?</th><th>In our project</th></tr></thead>
+          <tbody>
+            <tr>
+              <td>UDP flood protection</td>
+              <td>✅ Yes</td>
+              <td class="best">Reproduced — 99.7%</td>
+            </tr>
+            <tr>
+              <td><b>SYN flood protection</b></td>
+              <td class="color-red">❌ Not covered</td>
+              <td class="new">✨ Added by us — 99.9%</td>
+            </tr>
+            <tr>
+              <td><b>Both attacks in ONE eBPF program</b></td>
+              <td class="color-red">❌ No (only UDP)</td>
+              <td class="new">✨ Added by us — combined 99.8%</td>
+            </tr>
+            <tr>
+              <td>Kernel + controller hybrid design</td>
+              <td>✅ Yes</td>
+              <td>✅ Same design</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3>4.3 The SYN flood feature — how it works</h3>
+      <p>
+        A UDP flood is about <i>packets per second</i>. A SYN flood is about <i>connection attempts per
+        second</i>. So our SYN detector:
+      </p>
+      <ol>
+        <li>Only looks at TCP packets where the <b>SYN flag is set and the ACK flag is clear</b> — i.e.
+          "please start a new connection." (A normal TCP handshake's 2 SYNs are the tiny exception that
+          always passes.)</li>
+        <li>Counts those per <b>source IP</b> in its own map (<span class="inline-code">syn_map</span>).</li>
+        <li>Drops a sender's SYNs when it exceeds <b>200 connection attempts/second</b>.</li>
+      </ol>
+
+      <h3>4.4 The combined program (our main program)</h3>
+      <p>
+        Instead of two separate filters, we wrote <b>one</b> XDP program —
+        <span class="inline-code">ddos_filter_kern.c</span> — that handles <b>both</b> classes of traffic
+        in a single pass over each packet:
+      </p>
+      <ul>
+        <li>If the packet is <b>UDP</b> → run the UDP rate check (≥ 800 pps → drop).</li>
+        <li>If the packet is <b>TCP with SYN=1, ACK=0</b> → run the SYN rate check (≥ 200 new-conn/s → drop).</li>
+        <li>Everything else (ICMP, normal TCP traffic, …) → <span class="inline-code">XDP_PASS</span>.</li>
+      </ul>
+      <div class="diagram">
+        <div class="flow">
+          <div class="flow-row"><div class="node">📦 Incoming packet (any kind)</div></div>
+          <div class="arrow-down">▼</div>
+          <div class="flow-row"><div class="node filter">🧬 ddos_filter_kern.c (one XDP program)<b>check protocol → UDP? SYN? other?</b></div></div>
+          <div class="arrow-down">▼</div>
+          <div class="branch">
+            <div class="leg">
+              <div class="nod"><div class="node" style="border-color:rgba(248,113,113,.4)">🌊 UDP &gt; 800 pps → <b>DROP</b></div></div>
+              <div class="label">attacker gets stopped</div>
+            </div>
+            <div class="leg">
+              <div class="nod"><div class="node" style="border-color:rgba(248,113,113,.4)">🤝 SYN &gt; 200/s → <b>DROP</b></div></div>
+              <div class="label">attacker gets stopped</div>
+            </div>
+            <div class="leg">
+              <div class="nod"><div class="node" style="border-color:rgba(52,211,153,.4)">✅ Normal → <b>PASS</b></div></div>
+              <div class="label">legitimate users unaffected</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <h3>4.5 Everything stays together — the architecture</h3>
+      <div class="flow">
+        <div class="flow-row">
+          <div class="node attacker">🤖 attacker<b>hping3 floods</b><span class="ip">172.30.0.20</span></div>
+          <div class="arrow">➜</div>
+          <div class="node victim">🖥️ victim<b>fake network card → XDP</b><span class="ip">172.30.0.10</span></div>
+          <div class="arrow">◇</div>
+          <div class="node benign">😊 benign<b>normal iperf3 traffic</b><span class="ip">172.30.0.30</span></div>
+        </div>
+        <div class="arrow-down">▼</div>
+        <div class="flow-row">
+          <div class="node filter">🧬 ddos_filter_kern.o<b>drops floods, leaves notes</b></div>
+          <div class="arrow">➜</div>
+          <div class="node controller">🧩 controller.py<b>reads notes → iptables block → alerts.log</b></div>
+        </div>
+      </div>
+      <p class="small">
+        Everything runs on <b>one Linux computer</b> inside a private Docker network — the attack never
+        touches the real internet.
+      </p>
+    </section>
+
+    <!-- ===================== 5. CODE DEEP DIVE ===================== -->
+    <section id="code">
+      <h2><span class="num">5</span> Code Deep Dive</h2>
+      <p class="lead">
+        This is the heart of the project. We'll walk through every important file, in the same order they'd
+        appear in a build: a warm-up test program, the UDP filter, the SYN filter, the combined program,
+        the controller, and the build/testbed scripts.
+      </p>
+
+      <h3>5.0 Project layout</h3>
+      <pre><code data-lang="bash">ebpf/
+  hello_xdp.c          # quick test to prove XDP works on this machine
+  udp_filter_kern.c    # UDP flood filter   (reproduces the paper)
+  syn_filter_kern.c    # SYN flood filter   (OUR extension)
+  ddos_filter_kern.c   # COMBINED UDP+SYN   (OUR main program)
+  udp_filter_user.c    # optional manual loader + live table
+  Makefile             # builds all .c files into .o bytecode
+
+testbed/
+  setup_testbed.sh     # creates Docker network + victim/attacker/benign
+  ctl_udp.sh           # attach / detach the UDP filter (paper design)
+  attach_xdp.sh        # attach any filter to a container's interface
+  demo.sh              # ONE command: full simulation + results
+  report.sh            # formal with/without-filter test report
+  bench_* / start_controller.sh  # benchmarking & controller helpers
+
+controller/
+  controller.py        # reads kernel alerts, blocks IPs, logs events
+
+results/
+  UDP_results.md       # our detailed measured results
+  alerts.log           # log of detection + blocking events</code></pre>
+
+      <h3>5.1 Hello XDP — proving the front door exists (<span class="inline-code">hello_xdp.c</span>)</h3>
+      <p>
+        Before doing anything clever, we check that XDP works at all on this machine. This tiny program
+        parses the Ethernet + IP headers of every packet and prints a friendly message about what it saw.
+      </p>
+      <pre><code data-lang="c">#include &lt;linux/bpf.h&gt;
+#include &lt;linux/if_ether.h&gt;
+#include &lt;linux/ip.h&gt;
+#include &lt;bpf/bpf_helpers.h&gt;
+
+SEC("xdp")                       // attach this at the XDP hook
+int xdp_hello(struct xdp_md *ctx) {
+    void *data_end = (void *)(long)ctx->data_end;   // end of the packet
+    void *data     = (void *)(long)ctx->data;       // start of the packet
+
+    struct ethhdr *eth = data;
+    if ((void *)(eth + 1) > data_end) return XDP_PASS;  // safety: bounds check
+
+    struct iphdr *ip = (void *)(eth + 1);
+    if ((void *)(ip + 1) > data_end) return XDP_PASS;   // safety: bounds check
+
+    bpf_printk("hello_xdp: proto=%d src=%pI4 dst=%pI4\n",
+               ip->protocol, &ip->saddr, &ip->daddr);   // print to trace pipe
+
+    return XDP_PASS;  // let every packet through -- we're only testing
+}
+
+char _license[] SEC("license") = "GPL";  // required for helper calls</code></pre>
+      <p>
+        Two things to notice, because they appear in <i>every</i> program: the <b>bounds checks</b>
+        (the verifier demands them — we must prove we never read past the packet) and <b><span class="inline-code">SEC("xdp")</span></b>
+        (marks the function as an XDP program).
+      </p>
+
+      <h3>5.2 The UDP filter — reproducing the paper (<span class="inline-code">udp_filter_kern.c</span>)</h3>
+      <p>This is the paper's detector, written in ~90 lines. Explained step by step:</p>
+      <pre><code data-lang="c">#define RATE_THRESHOLD 800              // more than 800 packets/second = flooding
+#define WINDOW_NS      1000000000ULL     // the time window: 1 second, in nanoseconds
+
+struct pkt_count {                      // what we remember about each sender
+    __u64 count;                        // how many packets they sent
+    __u64 last_ts;                      // when we (re)started counting
+};
+
+/* map #1: per-sender packet counter. key = source IP, value = pkt_count.
+ * LRU_HASH = auto-forgets old senders when full. */
+struct { __uint(type, BPF_MAP_TYPE_LRU_HASH); __uint(max_entries, 65536);
+         __type(key, __u32); __type(value, struct pkt_count); } rate_map SEC(".maps");
+
+/* map #2: global statistics (total seen / dropped / alerted).
+ * PERCPU_ARRAY = one copy per CPU core so many cores can count without locks. */
+struct stats { __u64 total; __u64 dropped; __u64 alerted; };
+struct { __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY); __uint(max_entries, 1);
+         __type(key, __u32); __type(value, struct stats); } stats_map SEC(".maps");
+
+SEC("xdp")
+int xdp_udp_filter(struct xdp_md *ctx) {
+    void *data_end = (void *)(long)ctx->data_end;
+    void *data     = (void *)(long)ctx->data;
+
+    struct ethhdr *eth = data;
+    if ((void *)(eth + 1) > data_end) return XDP_PASS;        // bounds check
+    if (eth->h_proto != bpf_htons(ETH_P_IP)) return XDP_PASS; // only IPv4
+
+    struct iphdr *ip = (void *)(eth + 1);
+    if ((void *)(ip + 1) > data_end) return XDP_PASS;         // bounds check
+    __u32 src_ip = ip->saddr;                                 // WHO sent this?
+
+    __u32 key = 0;
+    struct stats *st = bpf_map_lookup_elem(&stats_map, &key);
+    if (st) __sync_fetch_and_add(&st->total, 1);              // +1 "seen"
+
+    __u64 now = bpf_ktime_get_ns();                           // current time (ns)
+
+    struct pkt_count *pc = bpf_map_lookup_elem(&rate_map, &src_ip);
+    if (!pc) {                                                // first time this sender
+        struct pkt_count init = { .count = 1, .last_ts = now };
+        bpf_map_update_elem(&rate_map, &src_ip, &init, BPF_ANY);
+        return XDP_PASS;                                      // not yet flooding
+    }
+
+    if (now - pc->last_ts >= WINDOW_NS) {                     // window expired?
+        pc->last_ts = now; pc->count = 1;                     // reset for new second
+        return XDP_PASS;
+    }
+
+    pc->count++;                                              // same-second, keep counting
+    if (pc->count > RATE_THRESHOLD) {                         // BUSTED
+        if (st) { __sync_fetch_and_add(&st->dropped, 1);
+                 __sync_fetch_and_add(&st->alerted, 1); }
+        if (st &amp;&amp; st->alerted % 1000 == 1)                   // throttle: print ~every 1000
+            bpf_printk("UDP FLOOD DETECTED from %pI4 count=%llu\n", &amp;src_ip, pc->count);
+        return XDP_DROP;                                      // throw it away, NOW
+    }
+    return XDP_PASS;                                          // still polite, let it through
+}</code></pre>
+      <div class="callout good">
+        <p class="tag"><span>Why atomics (<span class="inline-code">__sync_fetch_and_add</span>)?</span></p>
+        <p>
+          Many CPU cores run this program at once (one per packet). Adding to a shared counter from many
+          cores at the same time must be atomic, or numbers get corrupted. For per-CPU maps we don't even
+          need locks — each core has its own copy.
+        </p>
+      </div>
+
+      <h3>5.3 The SYN filter — our first new feature (<span class="inline-code">syn_filter_kern.c</span>)</h3>
+      <p>Same structure, but now we filter on <b>connection attempts</b>, not all packets:</p>
+      <pre><code data-lang="c">#define SYN_THRESHOLD 200               // > 200 new connections/second = flooding
+#define SYN_WINDOW_NS 1000000000ULL      // 1-second window
+
+struct syn_count { __u64 count; __u64 last_ts; };   // per-sender connection counter
+
+struct { __uint(type, BPF_MAP_TYPE_LRU_HASH); __uint(max_entries, 65536);
+         __type(key, __u32); __type(value, struct syn_count); } syn_map SEC(".maps");
+
+struct syn_stats { __u64 syn_total; __u64 syn_dropped; __u64 syn_alerted; };
+struct { __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY); __uint(max_entries, 1);
+         __type(key, __u32); __type(value, struct syn_stats); } syn_stats_map SEC(".maps");
+
+SEC("xdp")
+int xdp_syn_filter(struct xdp_md *ctx) {
+    ...
+    if (ip->protocol != IPPROTO_TCP) return XDP_PASS;    // only TCP
+
+    struct tcphdr *tcp = (void *)(ip + 1);
+    if ((void *)(tcp + 1) > data_end) return XDP_PASS;   // bounds check
+
+    /* KEY: only "please open a new connection" packets = SYN set + ACK clear.
+       Handshake replies (SYN+ACK) and data packets pass untouched. */
+    if (!(tcp->syn) || tcp->ack) return XDP_PASS;
+
+    __u32 src_ip = ip->saddr;
+    ...same 1-second sliding counter as UDP...
+    if (sc->count > SYN_THRESHOLD) {
+        ... __sync_fetch_and_add(&amp;st->syn_dropped, 1); ...
+        bpf_printk("SYN FLOOD DETECTED from %pI4 count=%llu\n", &amp;src_ip, sc->count);
+        return XDP_DROP;
+    }
+    return XDP_PASS;
+}</code></pre>
+      <p class="small">
+        The neat trick: a normal TCP connection only sends <b>2 SYNs total</b> — that's a few orders of
+        magnitude below 200/second, so real users are never touched.
+      </p>
+
+      <h3>5.4 The combined program — our main program (<span class="inline-code">ddos_filter_kern.c</span>)</h3>
+      <p>
+        We merge both detectors into <b>one</b> XDP function. Now a single attached program protects against
+        UDP floods AND SYN floods simultaneously. It has <b>both</b> maps
+        (<span class="inline-code">rate_map</span> + <span class="inline-code">syn_map</span>) and one combined
+        <span class="inline-code">stats_map</span> with six counters
+        (<span class="inline-code">udp_total, udp_dropped, udp_alerted, syn_total, syn_dropped, syn_alerted</span>).
+      </p>
+      <pre><code data-lang="c">SEC("xdp")
+int xdp_ddos_filter(struct xdp_md *ctx) {
+    ... parse Ethernet + IP headers, bounds checks ...
+    __u32 src_ip = ip->saddr;
+    __u32 key = 0;
+    struct stats *st = bpf_map_lookup_elem(&amp;stats_map, &amp;key);
+
+    if (ip->protocol == IPPROTO_UDP) {
+        /* ---- UDP flood detection (packets/second) ---- */
+        struct udphdr *udp = (void *)(ip + 1);
+        if ((void *)(udp + 1) > data_end) return XDP_PASS;
+        if (st) __sync_fetch_and_add(&amp;st->udp_total, 1);
+        ...
+        if (pc->count > RATE_THRESHOLD) {           // 800 pps
+            ... bpf_printk("UDP FLOOD DETECTED from ...");
+            return XDP_DROP;
+        }
+        return XDP_PASS;
+    }
+
+    if (ip->protocol == IPPROTO_TCP) {
+        /* ---- SYN flood detection (connection attempts/second) ---- */
+        struct tcphdr *tcp = (void *)(ip + 1);
+        if ((void *)(tcp + 1) > data_end) return XDP_PASS;
+        if (!(tcp->syn) || tcp->ack) return XDP_PASS;   // only new-connection SYNs
+        if (st) __sync_fetch_and_add(&amp;st->syn_total, 1);
+        ...
+        if (sc->count > SYN_THRESHOLD) {            // 200 conns/sec
+            ... bpf_printk("SYN FLOOD DETECTED from ...");
+            return XDP_DROP;
+        }
+        return XDP_PASS;
+    }
+
+    return XDP_PASS;   // ICMP and everything else passes
+}</code></pre>
+      <div class="callout good">
+        <p class="tag"><span>Why combine them?</span></p>
+        <p>
+          One program = one attach point = one place to manage, and both defenses share the same packet
+          parse (Ethernet + IP headers are parsed <i>once</i>, not twice). Attacking with UDP and SYN at the
+          same time still gets a combined <b>99.8%</b> drop rate.
+        </p>
+      </div>
+
+      <h3>5.5 The user-space controller (<span class="inline-code">controller/controller.py</span>)</h3>
+      <p>
+        The "flexible half". It reads the kernel's <span class="inline-code">trace_pipe</span>, finds alert
+        lines like <span class="inline-code">UDP FLOOD DETECTED from 172.30.0.20</span>, and reacts.
+      </p>
+      <pre><code data-lang="python">import re, subprocess, sys, time
+from datetime import datetime
+
+TRACE_PIPE = "/sys/kernel/tracing/trace_pipe"
+VICTIM     = "victim"
+LOG_FILE   = "results/alerts.log"
+
+SELF_IPS = {"172.30.0.10", "172.30.0.1", "127.0.0.1"}   # never block these
+
+ALERT_RE = re.compile(r"(UDP FLOOD|SYN FLOOD) DETECTED from (\d+\.\d+\.\d+\.\d+)")
+BLOCKED  = set()                                         # remember already-blocked IPs
+
+def block_ip(ip):
+    """Add a persistent iptables rule INSIDE the victim container."""
+    return run(["docker", "exec", VICTIM, "iptables",
+                "-A", "INPUT", "-s", ip, "-j", "DROP"])[0] == 0
+
+def main():
+    with open(TRACE_PIPE, "r") as tp:      # blocking read; new lines appear live
+        for line in tp:
+            m = ALERT_RE.search(line)
+            if not m:            continue
+            kind, ip = m.group(1), m.group(2)
+            if ip in SELF_IPS or ip in BLOCKED: continue
+            BLOCKED.add(ip)
+            log(f"{kind} detected from {ip} -- blocking via iptables")
+            if block_ip(ip): log(f"BLOCKED {ip} (iptables rule added in {VICTIM})")
+            else:            log(f"FAILED to block {ip}")</code></pre>
+      <p class="small">
+        The <span class="inline-code">% 1000 == 1</span> throttle in the kernel program means the pipe
+        doesn't drown in messages — the controller gets meaningful alerts, not millions.
+      </p>
+
+      <h3>5.6 Build &amp; testbed scripts</h3>
+      <p>The Makefile builds each <span class="inline-code">.c</span> file into eBPF bytecode (a <span class="inline-code">.o</span> file) using <span class="inline-code">clang</span> with the <span class="inline-code">bpf</span> target:</p>
+      <pre><code data-lang="makefile">CLANG ?= clang
+BPF_TARGET ?= bpf
+BPF_CFLAGS := -O2 -g -Wall -Wno-unused-value -Wno-pointer-sign -target bpf
+SRCS_KERN := udp_filter_kern.c syn_filter_kern.c ddos_filter_kern.c
+OBJS_KERN := $(SRCS_KERN:.c=.o)
+
+all: $(OBJS_KERN)
+$(OBJS_KERN): %.o: %.c
+    $(CLANG) $(BPF_CFLAGS) -c $&lt; -o $@
+clean:
+    rm -f $(OBJS_KERN)</code></pre>
+      <p>The <span class="inline-code">setup_testbed.sh</span> script builds the private network and containers:</p>
+      <pre><code data-lang="bash"># private network
+docker network create --driver bridge --subnet 172.30.0.0/24 ddos-net
+
+# victim   : gets the filter + server (privileged so XDP works inside it)
+docker run -d --name victim  --network ddos-net --privileged \
+  --cap-add NET_ADMIN --cap-add SYS_ADMIN --cap-add SYS_RESOURCE \
+  --ip 172.30.0.10 ubuntu:22.04 sleep infinity
+
+# attacker : only needs hping3 to flood
+docker run -d --name attacker --network ddos-net --ip 172.30.0.20 ubuntu sleep infinity
+# benign   : sends normal traffic
+docker run -d --name benign   --network ddos-net --ip 172.30.0.30 ubuntu sleep infinity
+
+docker exec -d victim iperf3 -s -p 5201          # UDP server on the victim</code></pre>
+      <p>
+        Then the filter is loaded into the victim with <span class="inline-code">bpftool</span> and pinned to its
+        network interface: <span class="inline-code">bpftool prog loadall ddos_filter_kern.o /sys/fs/bpf/ddos</span>
+        followed by <span class="inline-code">ip link set dev eth0 xdp pinned /sys/fs/bpf/ddos/xdp</span>. That's
+        the moment the virtual network card starts filtering!
+      </p>
+    </section>
+
+    <!-- ===================== 6. ALGORITHM ===================== -->
+    <section id="algorithm">
+      <h2><span class="num">6</span> The Detection Algorithm — Step by Step</h2>
+      <p class="lead">
+        Let's zoom into the brain of the system — a <b>sliding 1-second window rate counter per source IP</b> —
+        with a concrete example and a live interactive demo.
+      </p>
+
+      <h3>6.1 The algorithm, in plain words</h3>
+      <p>For a given sender (say 172.30.0.20):</p>
+      <ol>
+        <li><b>First packet ever seen:</b> store <span class="inline-code">count = 1</span> and remember the current time.</li>
+        <li><b>Next packets:</b> if less than <b>1 second</b> has passed since we started counting, add 1 to their count.</li>
+        <li><b>New second begins:</b> if 1 second has passed, <b>reset</b> the counter to 1 and restart the window.</li>
+        <li><b>Threshold:</b> if, inside one window, the count goes <b>above the limit</b> — 800 for UDP, 200 for SYN — every further packet from that sender in that window is <span class="inline-code">XDP_DROP</span>'d.</li>
+      </ol>
+      <p class="small">
+        It's a "sliding" window because each sender's window restarts whenever a second passes for that
+        specific sender — senders don't share one global clock.
+      </p>
+
+      <h3>6.2 A worked example (UDP, limit 800)</h3>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Time</th><th>What arrives from the sender</th><th>Counter</th><th>Decision</th></tr></thead>
+          <tbody>
+            <tr><td>t = 0 ms</td><td>packet #1</td><td>1</td><td class="color-green">PASS</td></tr>
+            <tr><td>t = 100 ms</td><td>packet #2</td><td>2</td><td class="color-green">PASS</td></tr>
+            <tr><td>…</td><td>… (packet rate climbs)</td><td>…</td><td class="color-green">PASS</td></tr>
+            <tr><td>t = 799 ms</td><td>packet #800</td><td>800</td><td class="color-green">PASS (limit reached, not passed)</td></tr>
+            <tr><td>t = 810 ms</td><td>packet #801</td><td>801</td><td class="color-red">DROP — flooding!</td></tr>
+            <tr><td>t = 820 ms…</td><td>packets #802, #803, …</td><td>&gt;800</td><td class="color-red">DROP</td></tr>
+            <tr><td>t = 1000 ms</td><td>— window expires —</td><td>reset → 1</td><td>fresh chance (but floods keep coming)</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="callout warn">
+        <p class="tag"><span>Important subtlety</span></p>
+        <p>
+          The <b>800th</b> packet still passes — the check is <span class="inline-code">count &gt; 800</span>,
+          not <span class="inline-code">count &gt;= 800</span>. So a legit sender running at almost exactly the
+          limit stays safe. This matters for §10.
+        </p>
+      </div>
+
+      <h3>6.3 Live demo — be the rate limiter 🎮</h3>
+      <p class="small">An attacker floods a steady stream of packets. Watch the counter climb and see exactly when it crosses 800 and switches from PASS to DROP. Click <b>Start flood</b>, then watch, then <b>Stop</b>.</p>
+      <div class="demo">
+        <div class="d-head">
+          <button id="btnStart">▶ Start flood (attack)</button>
+          <button id="btnStop" disabled>■ Stop</button>
+          <div class="d-stats">
+            Sender: <b>172.30.0.20</b> · Counter: <b id="dCount">0</b>/800 · State:
+            <b id="dState" style="color:var(--accent-2)">PASS (normal)</b> · Dropped: <b id="dDropped">0</b>
+          </div>
+        </div>
+        <canvas id="demoCanvas"></canvas>
+      </div>
+
+    </section>
+
+    <!-- ===================== 7. TESTBED ===================== -->
+    <section id="testbed">
+      <h2><span class="num">7</span> The Testbed</h2>
+      <p class="lead">
+        A <b>Docker simulation</b> — like the paper's — running entirely on one Linux computer. Three
+        containers on a private network act as the attacker, victim, and normal user.
+      </p>
+
+      <h3>7.1 The players</h3>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Container</th><th>IP</th><th>Role</th><th>Tools</th></tr></thead>
+          <tbody>
+            <tr><td><b>victim</b></td><td><span class="inline-code">172.30.0.10</span></td><td>The target. Runs an iperf3 UDP server and gets the eBPF/XDP filter attached to its virtual network card.</td><td><span class="inline-code">iperf3</span>, <span class="inline-code">bpftool</span>, <span class="inline-code">iptables</span></td></tr>
+            <tr><td><b>attacker</b></td><td><span class="inline-code">172.30.0.20</span></td><td>Launches UDP and SYN floods with hping3.</td><td><span class="inline-code">hping3</span></td></tr>
+            <tr><td><b>benign</b></td><td><span class="inline-code">172.30.0.30</span></td><td>Sends normal traffic (iperf3) to prove legit users are unaffected.</td><td><span class="inline-code">iperf3</span></td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="flow">
+        <div class="flow-row">
+          <div class="node attacker">🤖 attacker<b>hping3 floods</b><span class="ip">172.30.0.20</span></div>
+          <div class="arrow">➜</div>
+          <div class="node" style="max-width:120px;opacity:.6">🌐 fake switch<span class="ip">docker bridge</span></div>
+          <div class="arrow">➜</div>
+          <div class="node victim">🖥️ victim<b>XDP filter + iperf3 server</b><span class="ip">172.30.0.10</span></div>
+        </div>
+        <div class="arrow-down">▲</div>
+        <div class="branch" style="margin-top:6px">
+          <div class="leg"><div class="nod"><div class="node benign">😊 benign<b>normal iperf3 → victim</b><span class="ip">172.30.0.30</span></div></div></div>
+          <div class="leg"><div class="nod"><div class="node controller">🧩 controller.py<span class="ip">runs on host</span></div></div></div>
+        </div>
+      </div>
+
+      <h3>7.2 Why the victim container needs privileges</h3>
+      <p>
+        Attaching an XDP program and controlling the interface requires
+        <span class="inline-code">NET_ADMIN</span>, <span class="inline-code">SYS_ADMIN</span>, and
+        <span class="inline-code">--privileged</span>. Do not copy these flags to containers on a public
+        network — it's only acceptable inside a private testbed.
+      </p>
+
+      <h3>7.3 The attack tools</h3>
+      <ul>
+        <li><span class="inline-code">hping3 -2 -p 5201 --flood 172.30.0.10</span> → <b>UDP flood</b> (the <span class="inline-code">-2</span> = UDP mode). Four of these at once ≈ <b>100 Mbps</b>.</li>
+        <li><span class="inline-code">hping3 -S -p 5201 --flood 172.30.0.10</span> → <b>SYN flood</b> (<span class="inline-code">-S</span> = TCP SYN mode).</li>
+        <li><span class="inline-code">iperf3 -c 172.30.0.10 -p 5201 -u -b 3M -t 5</span> → <b>benign UDP traffic</b> at 3 Mbps (~250 packets/s, safely under the 800 limit).</li>
+      </ul>
+
+      <h3>7.4 The demo script (<span class="inline-code">demo.sh</span>) — one command, whole story</h3>
+      <p>The one-shot demo does every step and prints the important numbers:</p>
+      <ol>
+        <li>Make sure containers are running.</li>
+        <li>Start the iperf3 UDP server on the victim.</li>
+        <li>Install missing tools (<span class="inline-code">bpftool</span>, <span class="inline-code">iptables</span>) and attach the combined <span class="inline-code">ddos_filter_kern.o</span> to the victim's <span class="inline-code">eth0</span> XDP hook.</li>
+        <li>Start <span class="inline-code">controller.py</span>.</li>
+        <li>Launch the <b>UDP flood</b> for 8 s → read <span class="inline-code">drop_rate</span>.</li>
+        <li>Launch the <b>SYN flood</b> for 8 s → read <span class="inline-code">drop_rate</span>.</li>
+        <li>Send <b>benign traffic</b> → check extra drops = 0.</li>
+        <li>Show the controller log (detections + blocks).</li>
+      </ol>
+      <p class="small">
+        The drop rates come from reading the kernel's <span class="inline-code">stats_map</span> with
+        <span class="inline-code">bpftool map dump name stats_map</span> — real live kernel counters, not estimates.
+      </p>
+    </section>
+
+    <!-- ===================== 8. RESULTS ===================== -->
+    <section id="results">
+      <h2><span class="num">8</span> Results — What We Measured</h2>
+      <p class="lead">
+        Real measurements from our machine (Linux Mint, kernel 6.8, 16 cores, 13 GB RAM)
+        with attacker → (fake switch) → victim → normal user. Full detail in
+        <span class="inline-code">results/UDP_results.md</span>.
+      </p>
+
+      <h3>8.1 The headline drop rates</h3>
+      <div class="kpis">
+        <div class="kpi"><div class="label">UDP flood dropped</div><div class="value">99.7%</div><div class="note">3,430,479 seen → 3,421,663 dropped<br/><span class="chip paper">paper</span> ~99%</div></div>
+        <div class="kpi"><div class="label">SYN flood dropped <span class="chip ours">ours</span></div><div class="value sky">99.9%</div><div class="note">2,248,518 seen → 2,246,718 dropped</div></div>
+        <div class="kpi"><div class="label">Combined UDP + SYN</div><div class="value">99.8%</div><div class="note">4,914,345 seen → 4,905,345 dropped</div></div>
+        <div class="kpi"><div class="label">Normal (benign) traffic</div><div class="value" style="color:var(--accent-2)">0%</div><div class="note">dropped — legit users unaffected</div></div>
+      </div>
+
+      <div class="bar-row">
+        <div class="bar-label"><span>UDP flood drop rate</span><span>99.7%</span></div>
+        <div class="bar-track"><div class="bar-fill green" data-w="99.7"></div></div>
+      </div>
+      <div class="bar-row">
+        <div class="bar-label"><span>SYN flood drop rate (ours)</span><span>99.9%</span></div>
+        <div class="bar-track"><div class="bar-fill sky" data-w="99.9"></div></div>
+      </div>
+      <div class="bar-row">
+        <div class="bar-label"><span>Combined UDP + SYN</span><span>99.8%</span></div>
+        <div class="bar-track"><div class="bar-fill purple" data-w="99.8"></div></div>
+      </div>
+      <div class="bar-row">
+        <div class="bar-label"><span>Legitimate traffic dropped</span><span>0%</span></div>
+        <div class="bar-track"><div class="bar-fill red" data-w="2"></div></div>
+      </div>
+
+      <h3>8.2 Combined attack results (both floods at once)</h3>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Attack</th><th>Packets seen</th><th>Packets dropped</th><th>Drop rate</th></tr></thead>
+          <tbody>
+            <tr><td>UDP flood</td><td>2,535,743</td><td>2,528,543</td><td class="best">99.7%</td></tr>
+            <tr><td>SYN flood</td><td>2,378,602</td><td>2,376,802</td><td class="best">99.9%</td></tr>
+            <tr><td><b>Combined</b></td><td>4,914,345</td><td>4,905,345</td><td class="new">99.8%</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3>8.3 CPU &amp; latency</h3>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Metric</th><th>Filter OFF</th><th>Filter ON</th><th>Note</th></tr></thead>
+          <tbody>
+            <tr><td>Host CPU during UDP flood</td><td>~37.8%</td><td>~37.7%</td><td>≈ no change on this 16-core machine (see below)</td></tr>
+            <tr><td>Ping latency to victim</td><td>~0.066 ms</td><td>~0.078 ms</td><td class="best">stable, no degradation</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="callout warn">
+        <p class="tag"><span>Why our CPU numbers don't change much (but the paper's do)</span></p>
+        <p>
+          Our computer has <b>16 cores</b>, so a ~100 Mbps flood never fully saturates a single core, whether
+          the filter is on or off. The paper's dramatic CPU win (<b>45% → 12%</b>) appears on <b>small devices</b>
+          like a Raspberry Pi, where one core is the whole machine. The result that counts here — the
+          <b>~99% drop rate</b> — reproduces perfectly, and that's the core claim of the paper.
+        </p>
+      </div>
+
+      <h3>8.4 Legitimate traffic is preserved (the "false positive" test)</h3>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Traffic</th><th>Rate</th><th>vs. limit</th><th>Result</th></tr></thead>
+          <tbody>
+            <tr><td>Normal UDP (benign, 3 Mbps)</td><td>~250 pkts/s</td><td>below 800</td><td class="best">0% dropped</td></tr>
+            <tr><td>Normal UDP (10 Mbps)</td><td>~850 pkts/s</td><td><b>above</b> 800</td><td class="color-red">5.9% dropped</td></tr>
+            <tr><td>Normal TCP connection</td><td>2 SYN packets total</td><td>below 200</td><td class="best">0 dropped</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="callout good">
+        <p class="tag"><span>What this proves</span></p>
+        <p>
+          The filter only stops <b>flooding</b>, not normal use. We deliberately used 3 Mbps (~250 pkts/s) so
+          the legit client stays comfortably below the 800-packet limit — 0% loss. The 10 Mbps row is a nice
+          experiment: it shows the threshold is doing exactly its job (that user now looks like a flooder
+          and gets rate-limited).
+        </p>
+      </div>
+
+      <h3>8.5 End-to-end: filter + controller together</h3>
+      <p>When the controller ran alongside the filter, it:</p>
+      <ol>
+        <li>Read the kernel alert <span class="inline-code">"SYN FLOOD detected from 172.30.0.20"</span>.</li>
+        <li>Added an <b>iptables rule inside the victim</b> blocking 172.30.0.20.</li>
+        <li>Saved the event to <span class="inline-code">alerts.log</span>.</li>
+      </ol>
+      <p>Detection → blocking happened in <b>&lt; 2 seconds</b>, matching the paper's end-to-end response time.</p>
+    </section>
+
+    <!-- ===================== 9. COMPARISON ===================== -->
+    <section id="comparison">
+      <h2><span class="num">9</span> Paper vs. Our Project</h2>
+
+      <h3>9.1 Feature-by-feature</h3>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Feature</th><th>Tolay et al. (paper)</th><th>Our project</th></tr></thead>
+          <tbody>
+            <tr><td>Target platform</td><td>IoT edge devices (Raspberry Pi etc.)</td><td>Same — but tested in a Docker simulation</td></tr>
+            <tr><td>Detection approach</td><td>Per-source-IP packet rate (eBPF map)</td><td>Same</td></tr>
+            <tr><td>UDP flood defense</td><td class="best">✅ ~99% drop</td><td class="best">✅ 99.7% (reproduced)</td></tr>
+            <tr><td>SYN flood defense</td><td class="color-red">❌ Not implemented</td><td class="new">✅ 99.9% — <b>we added it</b></td></tr>
+            <tr><td>Combined single program</td><td class="color-red">❌ UDP only</td><td class="new">✅ One program, both defenses — <b>we added it</b></td></tr>
+            <tr><td>Kernel mitigation</td><td>XDP_DROP at the NIC</td><td>Same</td></tr>
+            <tr><td>User-space controller</td><td>Python, iptables block + Telegram notify</td><td>Python, iptables block + alerts.log (same hybrid design)</td></tr>
+            <tr><td>Alert throttle</td><td>—</td><td>Only prints every 1000 alerts (keeps log sane)</td></tr>
+            <tr><td>Verification method</td><td>Docker sim + real Raspberry Pi 4</td><td>Docker sim (16-core host)</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3>9.2 The key additions, summarized</h3>
+      <div class="cards">
+        <div class="card">
+          <div class="icon">🤝</div>
+          <h4>SYN flood protection</h4>
+          <p>
+            New detection class (connection attempts per second), new map
+            (<span class="inline-code">syn_map</span>), new stats counters — <b>99.9%</b> drop rate in our test.
+          </p>
+        </div>
+        <div class="card">
+          <div class="icon">🧬</div>
+          <h4>One combined program</h4>
+          <p>
+            <span class="inline-code">ddos_filter_kern.c</span> runs UDP + SYN checks in a single XDP pass,
+            sharing one packet parse and one stats map — 99.8% for simultaneous attacks.
+          </p>
+        </div>
+        <div class="card">
+          <div class="icon">📋</div>
+          <h4>Structured test suite</h4>
+          <p>
+            <span class="inline-code">demo.sh</span> (one-shot demo), <span class="inline-code">report.sh</span>
+            (formal with/without-filter report), and this complete documentation website.
+          </p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===================== 10. LIMITATIONS ===================== -->
+    <section id="limits">
+      <h2><span class="num">10</span> Limitations (Be Honest)</h2>
+      <p class="lead">
+        No defense is perfect. These are the known weaknesses — we keep them visible on purpose.
+      </p>
+
+      <div class="cards">
+        <div class="card">
+          <div class="icon">🎯</div>
+          <h4>Fixed thresholds</h4>
+          <p>
+            800 pkts/s (UDP) and 200 conns/s (SYN) are <b>hard-coded numbers</b>. A normal user faster than
+            the limit looks like a flooder and gets blocked too. The paper acknowledges this (its §6.3).
+          </p>
+        </div>
+        <div class="card">
+          <div class="icon">👁️</div>
+          <h4>Blind to content</h4>
+          <p>
+            We only measure <b>rate</b>. We cannot detect "low-and-slow" attacks (small but crafted traffic),
+            application-layer attacks, or malicious content hidden inside encrypted payloads.
+          </p>
+        </div>
+        <div class="card">
+          <div class="icon">📼</div>
+          <h4>Per-sender, not distributed</h4>
+          <p>
+            A true <b>D</b>DoS spreads across thousands of IPs — each well under the limit. Our
+            per-source-IP rate check would miss a huge, slow, distributed flood.
+          </p>
+        </div>
+        <div class="card">
+          <div class="icon">🐧</div>
+          <h4>Linux + modern kernel needed</h4>
+          <p>
+            eBPF/XDP needs a reasonably modern Linux kernel; many old or non-Linux IoT chips can't run it.
+          </p>
+        </div>
+        <div class="card">
+          <div class="icon">🛡️</div>
+          <h4>eBPF itself must be hardened</h4>
+          <p>
+            If attackers can load their own eBPF programs, they could disable our filter. Production needs
+            strict load permissions (e.g. CAP_BPF only for admins).
+          </p>
+        </div>
+        <div class="card">
+          <div class="icon">📋</div>
+          <h4>Management at scale</h4>
+          <p>
+            Deploying and updating filters across thousands/millions of devices needs secure orchestration
+            — a research area in itself.
+          </p>
+        </div>
+      </div>
+      <p class="small">
+        Bottom line: this is a <b>specialist tool</b> — a fast, first-line guard against volumetric floods —
+        not a complete security suite. Defense in depth (cloud scrubbing, firewalls, anomaly detection)
+        remains necessary.
+      </p>
+    </section>
+
+    <!-- ===================== 11. FUTURE WORK ===================== -->
+    <section id="future">
+      <h2><span class="num">11</span> Future Work</h2>
+      <p class="lead">
+        Where this project naturally goes next — inspired by the paper's own outlook and by what we learned.
+      </p>
+      <div class="cards">
+        <div class="card">
+          <div class="icon">🤖</div>
+          <h4>Adaptive thresholds with ML</h4>
+          <p>
+            Replace the fixed 800/200 with a model that learns each network's normal baseline and updates the
+            limits dynamically inside the eBPF map.
+          </p>
+        </div>
+        <div class="card">
+          <div class="icon">📡</div>
+          <h4>More attack classes</h4>
+          <p>
+            Detect IoT-protocol floods (MQTT, CoAP) and "low-and-slow" application-layer attacks — needs
+            deeper stateful analysis in the program.
+          </p>
+        </div>
+        <div class="card">
+          <div class="icon">🌐</div>
+          <h4>Distributed detection</h4>
+          <p>
+            Combine per-device counters into an orchestration layer that recognizes distributed multi-IP
+            floods.
+          </p>
+        </div>
+        <div class="card">
+          <div class="icon">🛩️</div>
+          <h4>Secure fleet management</h4>
+          <p>
+            OTA updates, central monitoring dashboards, and policy enforcement across thousands of IoT devices.
+          </p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===================== 12. HOW TO RUN ===================== -->
+    <section id="howto">
+      <h2><span class="num">12</span> How To Run It Yourself</h2>
+      <p class="lead">
+        Everything runs on <b>one Linux computer</b> — the attack stays inside a private Docker network,
+        never touching your real internet. Full guide: <span class="inline-code">HOW_TO_RUN.md</span>.
+      </p>
+
+      <h3>12.1 Prerequisites</h3>
+      <pre><code data-lang="bash">sudo apt update
+sudo apt install -y docker.io docker-compose-v2 \
+  clang llvm libbpf-dev libelf-dev pahole \
+  linux-tools-common linux-tools-generic \
+  hping3 iperf3 tcpdump python3-requests
+
+sudo usermod -aG docker $USER    # then log out/in, or run: newgrp docker</code></pre>
+
+      <h3>12.2 The easy way — one command</h3>
+      <pre><code data-lang="bash">make -C ebpf            # build the filter programs (first time only)
+sudo bash testbed/demo.sh   # network + filter + controller + both attacks + results</code></pre>
+      <p>Expected output (important numbers):</p>
+      <pre><code data-lang="bash">    UDP: seen=1673607 dropped=1666407  drop_rate=99.6%
+    SYN: seen=2126412 dropped=2124612  drop_rate=99.9%
+    benign UDP extra drops: 0  (expected: 0)
+    UDP FLOOD detected from 172.30.0.20 -- blocking via iptables
+    BLOCKED 172.30.0.20 (iptables rule added in victim)</code></pre>
+
+      <h3>12.3 The manual way — to see each part</h3>
+      <p><span class="step-num">A</span> Build the filters</p>
+      <pre><code data-lang="bash">make -C ebpf</code></pre>
+      <p><span class="step-num">B</span> Create the fake network (victim/attacker/benign)</p>
+      <pre><code data-lang="bash">sudo bash testbed/setup_testbed.sh</code></pre>
+      <p><span class="step-num">C</span> Attach the combined filter to the victim's network card</p>
+      <pre><code data-lang="bash">sudo docker cp ebpf/ddos_filter_kern.o victim:/tmp/ddos_filter_kern.o
+sudo docker exec victim bash -c '
+  BPF=$(ls /usr/lib/linux-tools/*/bpftool 2>/dev/null | head -1)
+  rm -rf /sys/fs/bpf/ddos
+  $BPF prog loadall /tmp/ddos_filter_kern.o /sys/fs/bpf/ddos
+  ip link set dev eth0 xdp pinned /sys/fs/bpf/ddos/xdp'
+# expected: "xdp" appears when you run:  ip link show dev eth0</code></pre>
+      <p><span class="step-num">D</span> Start the controller (observer that blocks IPs)</p>
+      <pre><code data-lang="bash">sudo bash testbed/start_controller.sh</code></pre>
+      <p><span class="step-num">E</span> Launch a UDP flood, then read the counters</p>
+      <pre><code data-lang="bash">for i in 1 2 3 4; do sudo docker exec -d attacker hping3 -2 -p 5201 --flood 172.30.0.10; done
+sleep 8
+sudo docker exec attacker pkill -9 hping3
+sudo docker exec victim bash -c '
+  BPF=$(ls /usr/lib/linux-tools/*/bpftool 2>/dev/null | head -1)
+  $BPF map dump name stats_map'   # expect udp_dropped ≈ 99% of udp_total</code></pre>
+      <p><span class="step-num">F</span> Launch a SYN flood and check again (<span class="inline-code">hping3 -S … --flood</span>) → <span class="inline-code">syn_dropped</span> ≈ 99% of <span class="inline-code">syn_total</span>.</p>
+      <p><span class="step-num">G</span> Prove normal traffic is untouched</p>
+      <pre><code data-lang="bash">sudo docker exec benign iperf3 -c 172.30.0.10 -p 5201 -u -b 3M -t 5
+# re-read stats_map → udp_dropped must NOT have increased
+sudo bash testbed/report.sh   # optional: full WITHOUT vs WITH filter report</code></pre>
+      <p><span class="step-num">H</span> Clean up when done</p>
+      <pre><code data-lang="bash">sudo docker exec victim ip link set dev eth0 xdp off
+sudo pkill -f controller.py
+sudo docker rm -f victim attacker benign
+sudo docker network rm ddos-net</code></pre>
+
+      <h3>12.4 Common problems and fixes</h3>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Problem</th><th>Fix</th></tr></thead>
+          <tbody>
+            <tr><td><span class="inline-code">container ... is not running</span></td><td>Machine rebooted → <span class="inline-code">sudo docker start victim attacker benign</span></td></tr>
+            <tr><td><span class="inline-code">bpftool: No such file or directory</span></td><td>Victim was recreated → run <span class="inline-code">demo.sh</span> (installs it automatically)</td></tr>
+            <tr><td><span class="inline-code">iptables: not found</span></td><td>Run <span class="inline-code">demo.sh</span> (installs iptables in victim automatically)</td></tr>
+            <tr><td>Drop rate slightly below 99%</td><td>Normal variance — still a success (paper reports ~99%)</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- ===================== 13. REFERENCES ===================== -->
+    <section id="references">
+      <h2><span class="num">13</span> References &amp; Credits</h2>
+      <ul>
+        <li><b>Paper we reproduce:</b> A. Tolay, <i>eBPF-Based Real-Time DDoS Mitigation for IoT Edge Devices</i>, Istinye University, July 2025 — <span class="inline-code">arXiv:2508.00851</span>.</li>
+        <li><b>eBPF/XDP original research:</b> T. Høiland‑Jørgensen et al., <i>The eXpress Data Path</i> (CoNEXT '18); R. de Sousa et al., <i>A Survey on eBPF</i> (ACM Computing Surveys, 2023).</li>
+        <li><b>Mirai botnet:</b> C. Kolias et al., <i>The Rise of the Mirai Botnet</i>, IEEE Spectrum, 2017.</li>
+        <li><b>MUD &amp; eBPF:</b> S. Feraudo et al., <i>Mitigating IoT Botnet DDoS Attacks through MUD and eBPF based Traffic Filtering</i> (IEEE ICC 2023).</li>
+        <li><b>Attack traffic tools:</b> <span class="inline-code">hping3</span>, <span class="inline-code">iperf3</span>, <span class="inline-code">tcpdump</span>.</li>
+        <li><b>Project repository</b> (this repo): source code, scripts, results, paper PDF.</li>
+      </ul>
+      <div class="callout">
+        <p class="tag"><span>How this site was made</span></p>
+        <p>
+          Pure static HTML / CSS / JavaScript — no frameworks, no build step. Open
+          <span class="inline-code">website/index.html</span> in any browser, or host the
+          <span class="inline-code">website/</span> folder anywhere static (GitHub Pages works perfectly).
+        </p>
+      </div>
+    </section>
+
+    <footer>
+      <p>
+        eBPF/XDP Real-Time DDoS Detection &amp; Mitigation · Computer Networks project · Semester 5 ·
+        Reproduced from <b>Tolay et al. 2025 (arXiv:2508.00851)</b> · Extended with <b>SYN flood</b> and
+        <b>combined UDP+SYN</b> protection.
+      </p>
+    </footer>
+
+  </main>
+</div>
+
+<button class="scroll-top" id="scrollTop" aria-label="Back to top">⬆</button>
+
+<script src="app.js"></script>
+</body>
+</html>

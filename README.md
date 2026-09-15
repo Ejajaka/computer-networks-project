@@ -12,6 +12,12 @@ This project is a **copy and improvement** of the paper
 > **▶ How to run it yourself:** see **[HOW_TO_RUN.md](HOW_TO_RUN.md)** — a step-by-step
 > guide with the commands, what to expect, how it was built, and simple explanations.
 
+> **🌐 Complete project explanation (website):** open
+> **[`website/index.html`](website/index.html)** in any browser (or visit the repo's
+> **GitHub Pages**). It explains the paper, our added SYN-flood + combined features,
+> every line of code, the testbed, the results, and how to run it — in simple words
+> with diagrams and an interactive demo.
+
 ---
 
 ## 1. What the results were
