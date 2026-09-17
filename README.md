@@ -11,6 +11,9 @@ This project is a **copy and improvement** of the paper
 
 > **▶ How to run it yourself:** see **[HOW_TO_RUN.md](HOW_TO_RUN.md)** — a step-by-step
 > guide with the commands, what to expect, how it was built, and simple explanations.
+>
+> **▶ Recreate everything from scratch:** see **[REPLICATION_GUIDE.md](REPLICATION_GUIDE.md)**
+> — a complete manual with every command and every file's full source code.
 
 > **🌐 Complete project explanation (website):** open
 > **[`website/index.html`](website/index.html)** in any browser (or visit the repo's
