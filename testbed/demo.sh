@@ -43,7 +43,7 @@ say "Step 2: install bpftool + iptables in victim if missing, then attach the co
 docker exec victim bash -c 'command -v bpftool >/dev/null 2>&1 || ls /usr/lib/linux-tools/*/bpftool >/dev/null 2>&1 || (apt-get update -qq && apt-get install -y -qq linux-tools-generic linux-tools-common)' >/dev/null 2>&1
 docker exec victim bash -c 'command -v iptables >/dev/null 2>&1 || (apt-get update -qq && apt-get install -y -qq iptables)' >/dev/null 2>&1
 BPF=$(bpf_path)
-docker cp "$PROJECT_DIR/ebpf/ddos_filter_kern.o" victim:/tmp/ddos_filter_kern.o >/dev/null 2>&1
+docker cp "$PROJECT_DIR/engine/ddos_filter_kern.o" victim:/tmp/ddos_filter_kern.o >/dev/null 2>&1
 docker exec victim bash -c "
   ip link set dev eth0 xdp off 2>/dev/null
   rm -rf /sys/fs/bpf/ddos

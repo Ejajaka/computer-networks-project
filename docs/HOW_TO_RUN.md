@@ -50,7 +50,7 @@ that normal traffic is preserved.
 
 ```bash
 cd ~/Desktop/CN
-make -C ebpf            # build the filter programs (first time only)
+make -C engine            # build the filter programs (first time only)
 sudo bash testbed/demo.sh
 ```
 
@@ -78,7 +78,7 @@ Same as above but done command-by-command so you can watch each part.
 
 ### Step A — build the filter programs
 ```bash
-cd ~/Desktop/CN/ebpf
+cd ~/Desktop/CN/engine
 make
 ```
 Creates `.o` files: `udp_filter_kern.o`, `syn_filter_kern.o`, `ddos_filter_kern.o`.
@@ -101,7 +101,7 @@ Check: `docker ps` → all three show **Up**.
 
 ### Step C — attach the combined filter to the victim
 ```bash
-sudo docker cp ~/Desktop/CN/ebpf/ddos_filter_kern.o victim:/tmp/ddos_filter_kern.o
+sudo docker cp ~/Desktop/CN/engine/ddos_filter_kern.o victim:/tmp/ddos_filter_kern.o
 sudo docker exec victim bash -c '
   BPF=$(ls /usr/lib/linux-tools/*/bpftool 2>/dev/null | head -1)
   rm -rf /sys/fs/bpf/ddos

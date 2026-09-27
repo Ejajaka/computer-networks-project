@@ -418,7 +418,7 @@
         <li><b>Kernel requirements:</b> needs a modern Linux kernel with eBPF/XDP support.</li>
       </ul>
       <p class="small">
-        ▶ Full text of the paper is in this repository: <span class="inline-code">tolay2025_ebpf_ddos_iot.pdf</span> / <span class="inline-code">paper.txt</span>.
+        ▶ Full text of the paper is in this repository: <span class="inline-code">docs/references/tolay2025_ebpf_ddos_iot.pdf</span> / <span class="inline-code">docs/references/paper.txt</span>.
       </p>
     </section>
 
@@ -561,7 +561,7 @@
       </p>
 
       <h3>5.0 Project layout</h3>
-      <pre><code data-lang="bash">ebpf/
+      <pre><code data-lang="bash">engine/
   hello_xdp.c          # quick test to prove XDP works on this machine
   udp_filter_kern.c    # UDP flood filter   (reproduces the paper)
   syn_filter_kern.c    # SYN flood filter   (OUR extension)
@@ -1241,7 +1241,7 @@ docker exec -d victim iperf3 -s -p 5201          # UDP server on the victim</cod
       <h2><span class="num">12</span> How To Run It Yourself</h2>
       <p class="lead">
         Everything runs on <b>one Linux computer</b> — the attack stays inside a private Docker network,
-        never touching your real internet. Full guide: <span class="inline-code">HOW_TO_RUN.md</span>.
+        never touching your real internet. Full guide: <span class="inline-code">docs/HOW_TO_RUN.md</span>.
       </p>
 
       <h3>12.1 Prerequisites</h3>
@@ -1254,7 +1254,7 @@ sudo apt install -y docker.io docker-compose-v2 \
 sudo usermod -aG docker $USER    # then log out/in, or run: newgrp docker</code></pre>
 
       <h3>12.2 The easy way — one command</h3>
-      <pre><code data-lang="bash">make -C ebpf            # build the filter programs (first time only)
+      <pre><code data-lang="bash">make -C engine            # build the filter programs (first time only)
 sudo bash testbed/demo.sh   # network + filter + controller + both attacks + results</code></pre>
       <p>Expected output (important numbers):</p>
       <pre><code data-lang="bash">    UDP: seen=1673607 dropped=1666407  drop_rate=99.6%
@@ -1265,11 +1265,11 @@ sudo bash testbed/demo.sh   # network + filter + controller + both attacks + res
 
       <h3>12.3 The manual way — to see each part</h3>
       <p><span class="step-num">A</span> Build the filters</p>
-      <pre><code data-lang="bash">make -C ebpf</code></pre>
+      <pre><code data-lang="bash">make -C engine</code></pre>
       <p><span class="step-num">B</span> Create the fake network (victim/attacker/benign)</p>
       <pre><code data-lang="bash">sudo bash testbed/setup_testbed.sh</code></pre>
       <p><span class="step-num">C</span> Attach the combined filter to the victim's network card</p>
-      <pre><code data-lang="bash">sudo docker cp ebpf/ddos_filter_kern.o victim:/tmp/ddos_filter_kern.o
+      <pre><code data-lang="bash">sudo docker cp engine/ddos_filter_kern.o victim:/tmp/ddos_filter_kern.o
 sudo docker exec victim bash -c '
   BPF=$(ls /usr/lib/linux-tools/*/bpftool 2>/dev/null | head -1)
   rm -rf /sys/fs/bpf/ddos

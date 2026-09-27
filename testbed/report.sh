@@ -152,7 +152,7 @@ docker start victim attacker benign >/dev/null 2>&1 || true
 docker exec -d victim pkill -9 iperf3 >/dev/null 2>&1 || true
 docker exec -d victim iperf3 -s -p 5201 >/dev/null 2>&1
 docker exec victim bash -c 'command -v iptables >/dev/null 2>&1 || (apt-get update -qq && apt-get install -y -qq iptables)' >/dev/null 2>&1
-docker cp "$PROJECT_DIR/ebpf/ddos_filter_kern.o" victim:/tmp/ddos_filter_kern.o >/dev/null 2>&1
+docker cp "$PROJECT_DIR/engine/ddos_filter_kern.o" victim:/tmp/ddos_filter_kern.o >/dev/null 2>&1
 echo "   >> Ready."
 
 scenario udp

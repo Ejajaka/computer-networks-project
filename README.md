@@ -9,10 +9,10 @@ This project is a **copy and improvement** of the paper
 - **Extended:** added **SYN flood** protection (spot a sender that is trying to start too
   many new connections at once), and combined **both** into one program.
 
-> **▶ How to run it yourself:** see **[HOW_TO_RUN.md](HOW_TO_RUN.md)** — a step-by-step
+> **▶ How to run it yourself:** see **[docs/HOW_TO_RUN.md](docs/HOW_TO_RUN.md)** — a step-by-step
 > guide with the commands, what to expect, how it was built, and simple explanations.
 >
-> **▶ Recreate everything from scratch:** see **[REPLICATION_GUIDE.md](REPLICATION_GUIDE.md)**
+> **▶ Recreate everything from scratch:** see **[docs/REPLICATION_GUIDE.md](docs/REPLICATION_GUIDE.md)**
 > — a complete manual with every command and every file's full source code.
 
 > **🌐 Complete project explanation (website):** open
@@ -67,22 +67,28 @@ This project is a **copy and improvement** of the paper
 ## 3. The files
 
 ```
-ebpf/
+engine/
   hello_xdp.c          # quick test program (proves XDP works)
   udp_filter_kern.c    # UDP flood filter (reproduces the paper)
   syn_filter_kern.c    # SYN flood filter (our extension)
   ddos_filter_kern.c   # COMBINED UDP + SYN filter (our main program)
   Makefile             # build script (clang -> eBPF)
+controller/
+  controller.py        # reads notes, blocks attacker IP, logs events
 testbed/
   setup_testbed.sh     # creates the fake network + victim/attacker/benign
   ctl_udp.sh           # turn the filter on/off inside the victim
   bench_run.sh         # measures CPU and response time
   start_controller.sh  # starts the controller program
-controller/
-  controller.py        # reads notes, blocks attacker IP, logs events
 results/
   UDP_results.md       # the measured results in detail
   alerts.log           # event log from the runs
+docs/
+  HOW_TO_RUN.md        # step-by-step run/verify guide
+  REPLICATION_GUIDE.md # full rebuild manual
+  Project_Explanation.docx / .pdf
+  references/          # paper.txt + the original paper PDF
+website/               # the interactive GitHub Pages site
 ```
 
 ---
@@ -91,20 +97,20 @@ results/
 
 **Easiest — one command does everything:**
 ```bash
-make -C ebpf                     # build the filters (first time only)
+make -C engine                    # build the filters (first time only)
 sudo bash testbed/demo.sh        # builds network, attaches filter, runs attacks, prints results
 ```
 
 **Manual, step by step:**
 ```bash
 # 1. build the filters
-cd ~/Desktop/CN/ebpf && make
+cd ~/Desktop/CN/engine && make
 
 # 2. build the fake network
 cd ~/Desktop/CN/testbed && sudo bash setup_testbed.sh
 
 # 3. put the combined filter on the victim
-sudo docker cp ~/Desktop/CN/ebpf/ddos_filter_kern.o victim:/tmp/ddos_filter_kern.o
+sudo docker cp ~/Desktop/CN/engine/ddos_filter_kern.o victim:/tmp/ddos_filter_kern.o
 sudo docker exec victim bash -c '
   BPF=$(ls /usr/lib/linux-tools/*/bpftool 2>/dev/null | head -1)
   rm -rf /sys/fs/bpf/ddos

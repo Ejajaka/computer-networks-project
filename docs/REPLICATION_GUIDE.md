@@ -109,7 +109,7 @@ clang --version                 # should show a version
 ## Step 2 — Create the project folders
 
 ```bash
-mkdir -p ~/Desktop/CN/ebpf ~/Desktop/CN/testbed ~/Desktop/CN/controller ~/Desktop/CN/results
+mkdir -p ~/Desktop/CN/engine ~/Desktop/CN/testbed ~/Desktop/CN/controller ~/Desktop/CN/results
 cd ~/Desktop/CN
 ```
 
@@ -117,11 +117,13 @@ Folder layout:
 
 ```
 CN/
-├── ebpf/          # the eBPF/XDP C programs + Makefile
-├── testbed/       # Docker setup + run/report/benchmark scripts
+├── engine/        # the eBPF/XDP C programs + Makefile (the main engine)
 ├── controller/    # the Python controller
+├── testbed/       # Docker setup + run/report/benchmark scripts
 ├── results/       # measured results + alerts log
-└── (docs)         # README.md, HOW_TO_RUN.md, Project_Explanation.docx/pdf
+├── website/       # interactive GitHub Pages site
+├── docs/          # README.md, HOW_TO_RUN.md, REPLICATION_GUIDE.md, references/
+└── .github/       # Pages deployment workflow
 ```
 
 ---
@@ -137,7 +139,7 @@ victim's network card at the **XDP hook**.
 | `syn_filter_kern.c` | SYN flood detection (our extension) |
 | `ddos_filter_kern.c` | **Combined** UDP + SYN in one program (main deliverable) |
 
-### File: `ebpf/udp_filter_kern.c`
+### File: `engine/udp_filter_kern.c`
 
 ```c
 // SPDX-License-Identifier: GPL-2.0
@@ -234,7 +236,7 @@ int xdp_udp_filter(struct xdp_md *ctx)
 char _license[] SEC("license") = "GPL";
 ```
 
-### File: `ebpf/syn_filter_kern.c`
+### File: `engine/syn_filter_kern.c`
 
 ```c
 // SPDX-License-Identifier: GPL-2.0
@@ -344,7 +346,7 @@ int xdp_syn_filter(struct xdp_md *ctx)
 char _license[] SEC("license") = "GPL";
 ```
 
-### File: `ebpf/ddos_filter_kern.c`  (the main combined program)
+### File: `engine/ddos_filter_kern.c`  (the main combined program)
 
 ```c
 // SPDX-License-Identifier: GPL-2.0
@@ -511,7 +513,7 @@ char _license[] SEC("license") = "GPL";
 
 ## Step 4 — The Makefile (build system)
 
-### File: `ebpf/Makefile`
+### File: `engine/Makefile`
 
 ```make
 CLANG ?= clang
@@ -547,7 +549,7 @@ on Ubuntu; eBPF programs need it.
 ## Step 5 — Build the programs
 
 ```bash
-cd ~/Desktop/CN/ebpf
+cd ~/Desktop/CN/engine
 make
 ```
 
@@ -571,7 +573,7 @@ The kernel runs a **verifier** (a static safety analysis) before loading any eBP
 program. It guarantees the code terminates quickly and cannot crash the system.
 
 ```bash
-cd ~/Desktop/CN/ebpf
+cd ~/Desktop/CN/engine
 sudo bpftool prog load ddos_filter_kern.o /sys/fs/bpf/vcheck
 sudo rm -rf /sys/fs/bpf/vcheck
 ```
@@ -783,7 +785,7 @@ XDP hook.
 cd ~/Desktop/CN
 
 # 1. copy the compiled program into the victim container
-sudo docker cp ebpf/ddos_filter_kern.o victim:/tmp/ddos_filter_kern.o
+sudo docker cp engine/ddos_filter_kern.o victim:/tmp/ddos_filter_kern.o
 
 # 2. find bpftool inside the victim (version independent) and attach
 sudo docker exec victim bash -c '
@@ -906,7 +908,7 @@ say "Step 2: install bpftool + iptables in victim if missing, then attach the co
 docker exec victim bash -c 'command -v bpftool >/dev/null 2>&1 || ls /usr/lib/linux-tools/*/bpftool >/dev/null 2>&1 || (apt-get update -qq && apt-get install -y -qq linux-tools-generic linux-tools-common)' >/dev/null 2>&1
 docker exec victim bash -c 'command -v iptables >/dev/null 2>&1 || (apt-get update -qq && apt-get install -y -qq iptables)' >/dev/null 2>&1
 BPF=$(bpf_path)
-docker cp "$PROJECT_DIR/ebpf/ddos_filter_kern.o" victim:/tmp/ddos_filter_kern.o >/dev/null 2>&1
+docker cp "$PROJECT_DIR/engine/ddos_filter_kern.o" victim:/tmp/ddos_filter_kern.o >/dev/null 2>&1
 docker exec victim bash -c "
   ip link set dev eth0 xdp off 2>/dev/null
   rm -rf /sys/fs/bpf/ddos
@@ -968,7 +970,7 @@ echo "    Alerts log          : ~/Desktop/CN/results/alerts.log"
 **Run it:**
 ```bash
 cd ~/Desktop/CN
-make -C ebpf          # ensure filters are built
+make -C engine          # ensure filters are built
 sudo bash testbed/demo.sh
 ```
 
@@ -1084,12 +1086,14 @@ sudo docker network rm ddos-net
 
 ```
 CN/
-├── ebpf/
+├── engine/
 │   ├── Makefile              # build system
 │   ├── udp_filter_kern.c     # UDP flood filter (paper reproduction)
 │   ├── syn_filter_kern.c     # SYN flood filter (extension)
 │   ├── ddos_filter_kern.c    # combined UDP+SYN filter (main)
 │   └── hello_xdp.c           # (dev only) XDP smoke test
+├── controller/
+│   └── controller.py         # alert reader + iptables blocker + logger
 ├── testbed/
 │   ├── setup_testbed.sh      # create network + containers
 │   ├── demo.sh               # one-command full demo
@@ -1099,16 +1103,19 @@ CN/
 │   ├── ctl_udp.sh            # attach/detach filter
 │   ├── container_veth.sh     # container → veth mapping
 │   └── start_controller.sh   # launch controller daemon
-├── controller/
-│   └── controller.py         # alert reader + iptables blocker + logger
 ├── results/
 │   ├── UDP_results.md        # detailed measured results
 │   └── alerts.log            # event log (generated)
+├── website/                  # interactive GitHub Pages site
+├── docs/
+│   ├── HOW_TO_RUN.md
+│   ├── REPLICATION_GUIDE.md
+│   ├── Project_Explanation.docx / .pdf
+│   └── references/
+│       ├── paper.txt                    # extracted paper text
+│       └── tolay2025_ebpf_ddos_iot.pdf  # the original paper
 ├── README.md
-├── HOW_TO_RUN.md
-├── Project_Explanation.docx / .pdf
-├── paper.txt                 # extracted paper text
-└── tolay2025_ebpf_ddos_iot.pdf   # the original paper
+└── .github/workflows/deploy-pages.yml   # Pages deployment
 ```
 
 ---
