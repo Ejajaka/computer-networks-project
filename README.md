@@ -16,7 +16,7 @@ This project is a **copy and improvement** of the paper
 > — a complete manual with every command and every file's full source code.
 
 > **🌐 Complete project explanation (website):** open
-> **[`website/index.html`](website/index.html)** in any browser (or visit the repo's
+> **[`docs/website/index.html`](docs/website/index.html)** in any browser (or visit the repo's
 > **GitHub Pages**). It explains the paper, our added SYN-flood + combined features,
 > every line of code, the testbed, the results, and how to run it — in simple words
 > with diagrams and an interactive demo.
@@ -88,7 +88,7 @@ docs/
   REPLICATION_GUIDE.md # full rebuild manual
   Project_Explanation.docx / .pdf
   references/          # paper.txt + the original paper PDF
-website/               # the interactive GitHub Pages site
+  website/             # the interactive GitHub Pages site
 ```
 
 ---

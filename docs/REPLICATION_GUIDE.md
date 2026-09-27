@@ -121,8 +121,7 @@ CN/
 ├── controller/    # the Python controller
 ├── testbed/       # Docker setup + run/report/benchmark scripts
 ├── results/       # measured results + alerts log
-├── website/       # interactive GitHub Pages site
-├── docs/          # README.md, HOW_TO_RUN.md, REPLICATION_GUIDE.md, references/
+├── docs/          # README.md, HOW_TO_RUN.md, REPLICATION_GUIDE.md, references/, website/
 └── .github/       # Pages deployment workflow
 ```
 
@@ -1106,14 +1105,14 @@ CN/
 ├── results/
 │   ├── UDP_results.md        # detailed measured results
 │   └── alerts.log            # event log (generated)
-├── website/                  # interactive GitHub Pages site
 ├── docs/
 │   ├── HOW_TO_RUN.md
 │   ├── REPLICATION_GUIDE.md
 │   ├── Project_Explanation.docx / .pdf
-│   └── references/
-│       ├── paper.txt                    # extracted paper text
-│       └── tolay2025_ebpf_ddos_iot.pdf  # the original paper
+│   ├── references/
+│   │   ├── paper.txt                    # extracted paper text
+│   │   └── tolay2025_ebpf_ddos_iot.pdf  # the original paper
+│   └── website/                         # interactive GitHub Pages site
 ├── README.md
 └── .github/workflows/deploy-pages.yml   # Pages deployment
 ```
