@@ -39,6 +39,7 @@ struct {
 SEC("xdp")
 int xdp_syn_filter(struct xdp_md *ctx)
 {
+    // Packet arrives
     void *data_end = (void *)(long)ctx->data_end;
     void *data = (void *)(long)ctx->data;
 
@@ -46,24 +47,25 @@ int xdp_syn_filter(struct xdp_md *ctx)
     if ((void *)(eth + 1) > data_end)
         return XDP_PASS;
 
+    // Is it IPv4?
     if (eth->h_proto != bpf_htons(ETH_P_IP))
-        return XDP_PASS;
+        return XDP_PASS;  // PASS
 
     struct iphdr *ip = (void *)(eth + 1);
     if ((void *)(ip + 1) > data_end)
         return XDP_PASS;
 
+    // Is it TCP?
     if (ip->protocol != IPPROTO_TCP)
-        return XDP_PASS;
+        return XDP_PASS;  // PASS
 
     struct tcphdr *tcp = (void *)(ip + 1);
     if ((void *)(tcp + 1) > data_end)
         return XDP_PASS;
 
-    /* SYN flood = high rate of SYN packets not part of an established
-     * handshake (SYN set, ACK clear). */
+    // Is it SYN without ACK?
     if (!(tcp->syn) || tcp->ack)
-        return XDP_PASS;
+        return XDP_PASS;  // PASS
 
     __u32 src_ip = ip->saddr;
 
@@ -72,33 +74,37 @@ int xdp_syn_filter(struct xdp_md *ctx)
     if (st)
         __sync_fetch_and_add(&st->syn_total, 1);
 
+    // Count SYN
     __u64 now = bpf_ktime_get_ns();
 
     struct syn_count *sc = bpf_map_lookup_elem(&syn_map, &src_ip);
     if (!sc) {
         struct syn_count init = { .count = 1, .last_ts = now };
         bpf_map_update_elem(&syn_map, &src_ip, &init, BPF_ANY);
-        return XDP_PASS;
+        return XDP_PASS;  // PASS
     }
 
     if (now - sc->last_ts >= SYN_WINDOW_NS) {
         sc->last_ts = now;
         sc->count = 1;
-        return XDP_PASS;
+        return XDP_PASS;  // PASS
     }
 
     sc->count++;
+    // More than 200 SYNs in 1 sec?
     if (sc->count > SYN_THRESHOLD) {
         if (st) {
             __sync_fetch_and_add(&st->syn_dropped, 1);
             __sync_fetch_and_add(&st->syn_alerted, 1);
         }
+        // Alert/log
         if (st && st->syn_alerted % 1000 == 1)
             bpf_printk("SYN FLOOD DETECTED from %pI4 count=%llu\n", &src_ip, sc->count);
+        // DROP
         return XDP_DROP;
     }
 
-    return XDP_PASS;
+    return XDP_PASS;  // PASS
 }
 
 char _license[] SEC("license") = "GPL";

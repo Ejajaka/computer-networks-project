@@ -4,6 +4,18 @@
 # DDoS Detection & Mitigation using eBPF and XDP
 # Compares results WITH and WITHOUT the eBPF/XDP filter.
 # Usage:  sudo bash report.sh
+#
+# The polished version of the demo. Reproduces a paper (Tolay et al., 2025)
+# and extends it with SYN floods. For both UDP and SYN floods it measures
+# TWICE - without and with the filter - and compares:
+#   packets that reached the victim,
+#   packets dropped by XDP,
+#   host CPU during the flood,
+#   ping latency.
+# At the end it prints a summary table and a legitimate-traffic test.
+#
+# NOTE: the summary text hardcodes "~99%" no matter what the numbers actually
+# turn out to be - check the real numbers in the table.
 # =============================================================================
 set -uo pipefail
 
@@ -18,7 +30,7 @@ bpf_path() {
     'ls /usr/lib/linux-tools/*/bpftool 2>/dev/null | head -1 || echo bpftool'
 }
 
-attach_filter() {
+attach_filter() {   # load + pin + attach the combined filter on victim eth0
   docker exec victim bash -c "
     ip link set dev eth0 xdp off 2>/dev/null
     rm -rf /sys/fs/bpf/ddos
@@ -26,26 +38,26 @@ attach_filter() {
     ip link set dev eth0 xdp pinned /sys/fs/bpf/ddos/xdp" 2>/dev/null
 }
 
-detach_filter() {
+detach_filter() {   # remove the filter + delete pinned files
   docker exec victim bash -c "ip link set dev eth0 xdp off 2>/dev/null; rm -rf /sys/fs/bpf/ddos" 2>/dev/null
 }
 
-xdp_stats() {   # udp_total udp_dropped syn_total syn_dropped
+xdp_stats() {   # read the filter's stats map -> udp_total udp_dropped syn_total syn_dropped
   docker exec victim bash -c "$(bpf_path) map dump name stats_map 2>/dev/null" 2>/dev/null \
     | grep -oE '"(udp_total|udp_dropped|syn_total|syn_dropped)": [0-9]+' \
     | awk -F': ' '{s[$1]+=$2} END{printf "%d %d %d %d",s["\"udp_total\""]+0,s["\"udp_dropped\""]+0,s["\"syn_total\""]+0,s["\"syn_dropped\""]+0}'
 }
 
-rx_pkts() {     # eth0 rx packet counter on victim
+rx_pkts() {     # eth0 rx packet counter on victim (packets that reached the NIC)
   docker exec victim bash -c 'cat /proc/net/dev | grep eth0' 2>/dev/null | awk '{print $3}'
 }
 
-host_cpu() {    # overall host CPU % over ~1s
+host_cpu() {    # overall host CPU % over ~1s (two /proc/stat snapshots)
   l1=$(grep '^cpu ' /proc/stat); sleep 1; l2=$(grep '^cpu ' /proc/stat)
   echo "$l1 $l2" | awk '{id1=$5+$6;t1=$2+$3+$4+$5+$6+$7+$8;id2=$16+$17;t2=$13+$14+$15+$16+$17+$18+$19;printf "%.1f",100*(1-(id2-id1)/(t2-t1))}'
 }
 
-ping_avg() {
+ping_avg() {    # ping the victim 5 times and average the round-trip time
   ping -c 5 -W 1 "$VICTIM_IP" 2>/dev/null | grep -oP 'time=\K[0-9.]+' \
     | awk '{s+=$1;a[NR]=$1}END{if(NR)printf "%.2f",s/NR;else printf "FAIL"}'
 }
@@ -54,9 +66,9 @@ attack() {      # attack <udp|syn>  (launches flood for DURATION seconds)
   local mode="$1"
   for i in 1 2 3 4; do
     if [ "$mode" = "udp" ]; then
-      docker exec -d attacker hping3 -2 -p 5201 --flood "$VICTIM_IP" >/dev/null 2>&1
+      docker exec -d attacker hping3 -2 -p 5201 --flood "$VICTIM_IP" >/dev/null 2>&1   # UDP flood
     else
-      docker exec -d attacker hping3 -S -p 5201 --flood "$VICTIM_IP" >/dev/null 2>&1
+      docker exec -d attacker hping3 -S -p 5201 --flood "$VICTIM_IP" >/dev/null 2>&1   # SYN flood
     fi
   done
   sleep "$DURATION"
@@ -65,6 +77,8 @@ attack() {      # attack <udp|syn>  (launches flood for DURATION seconds)
 }
 
 run_with_cpu() {   # run_with_cpu <udp|syn>  -> "CPU_AVG rx_delta"
+  # runs the attack in the background, samples host CPU while it runs,
+  # then reports average CPU and the NIC rx-packet delta
   local mode="$1"
   local r1 r2 cpusum n
   r1=$(rx_pkts); cpusum=0; n=0
@@ -79,7 +93,7 @@ run_with_cpu() {   # run_with_cpu <udp|syn>  -> "CPU_AVG rx_delta"
   awk -v c="$cpusum" -v n="$n" -v d="$((r2-r1))" 'BEGIN{printf "%.1f %d",(n?c/n:0),d}'
 }
 
-fmt() { python3 -c "print(f'{int($1):,}')"; }
+fmt() { python3 -c "print(f'{int($1):,}')"; }   # add commas to big numbers (e.g. 1234567 -> 1,234,567)
 
 # ---------------- one scenario: measure without/with filter ------------------
 scenario() {    # scenario <udp|syn>
@@ -98,9 +112,9 @@ scenario() {    # scenario <udp|syn>
 
   # ----- Scenario B: WITH filter -----
   attach_filter
-  read -r U0 UD0 S0 SD0 < <(xdp_stats)
+  read -r U0 UD0 S0 SD0 < <(xdp_stats)          # stats BEFORE
   read -r CPUYES NIC_YES < <(run_with_cpu "$mode")
-  read -r U1 UD1 S1 SD1 < <(xdp_stats)
+  read -r U1 UD1 S1 SD1 < <(xdp_stats)          # stats AFTER
   LAT_YES=$(ping_avg)
 
   if [ "$mode" = "udp" ]; then
@@ -109,7 +123,7 @@ scenario() {    # scenario <udp|syn>
     TOT=$((S1-S0)); DROP=$((SD1-SD0))
   fi
   RATE=$(awk -v t="$TOT" -v d="$DROP" 'BEGIN{if(t)printf "%.1f",100*d/t;else print "0.0"}')
-  DELIVERED_YES=$((TOT-DROP))
+  DELIVERED_YES=$((TOT-DROP))   # packets that survived the filter = reached the app
 
   # store for the final summary
   if [ "$mode" = "udp" ]; then
@@ -159,6 +173,7 @@ scenario udp
 scenario syn
 
 # ----- legitimate traffic test -----
+# normal user sends 3 Mbps for 5 s with the filter ON - extra drops should be 0
 echo ""
 echo "---------------------------------------------------------------------------------"
 printf "  %-28s %s\n" "" "LEGITIMATE TRAFFIC (filter ON, normal user)"
@@ -177,13 +192,15 @@ echo "════════════════════════�
 echo "   SUMMARY OF RESULTS"
 echo "═════════════════════════════════════════════════════════════════════════════════"
 echo ""
+# NOTE: this text hardcodes "~99%" even if the actual numbers differ -
+# trust the table above, not this sentence.
 echo "   The eBPF/XDP filter drops ~99% of both UDP and SYN flood traffic at the"
 echo "   earliest point in the network stack, while legitimate traffic passes with"
 echo "   0% loss. This matches the published result (~99%) and extends it to SYN floods."
 echo ""
 
 # ----- explicit WITH vs WITHOUT difference table -----
-red_no()  { python3 -c "n=$1; y=$2; print(f'{(100*(n-y)/n):.1f}%' if n else '0.0%')"; }
+red_no()  { python3 -c "n=$1; y=$2; print(f'{(100*(n-y)/n):.1f}%' if n else '0.0%')"; }   # percentage reduction
 echo "   -------------------------------------------------------------------------"
 echo "   WITH vs WITHOUT FILTER — DIFFERENCE"
 echo "   -------------------------------------------------------------------------"
