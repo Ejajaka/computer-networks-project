@@ -40,6 +40,9 @@ state = {
     "app_pps": 0,
     "drop_pct": 0.0,
     "seen_total": 0,
+    "normal_running": False,
+    "normal_status": "idle",
+    "normal_loss": None,
     "history": [],           # list of {t, nic, app}
 }
 
@@ -185,6 +188,34 @@ def flood_loop():
         state["flood_remaining"] = 0
 
 
+# ---------------------------------------------------------------- normal traffic
+def normal_loop():
+    """Runs a legitimate user's traffic (iperf3 from benign) in a loop and
+    reports the packet loss. Normal traffic should NOT be dropped."""
+    while True:
+        with lock:
+            if not state["normal_running"]:
+                break
+        out = sh(f"docker exec benign iperf3 -c {VICTIM_IP} -p 5201 -u -b 3M "
+                 f"-t 4 --json", timeout=20)
+        try:
+            j = json.loads(out)
+            s = j["end"]["sum"]
+            loss = round(s.get("lost_percent", 0.0), 1)
+            mbps = s.get("bits_per_second", 0) / 1e6
+            with lock:
+                state["normal_loss"] = loss
+                state["normal_status"] = f"{mbps:.1f} Mbps, {loss:.1f}% loss"
+        except Exception:
+            with lock:
+                state["normal_status"] = "running..."
+        time.sleep(0.5)
+    with lock:
+        state["normal_running"] = False
+        state["normal_status"] = "idle"
+        state["normal_loss"] = None
+
+
 # ---------------------------------------------------------------- HTTP
 PAGE = r"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
@@ -198,9 +229,10 @@ PAGE = r"""<!DOCTYPE html>
  .value{font-size:30px;font-weight:700;margin-top:6px}
  .app{color:#34d399}.nic{color:#60a5fa}.drop{color:#f87171}
  .controls{display:flex;gap:16px;flex-wrap:wrap;margin:20px 0}
- button{font-size:15px;font-weight:600;border:0;border-radius:10px;padding:12px 22px;cursor:pointer;color:#fff}
+ <button{font-size:15px;font-weight:600;border:0;border-radius:10px;padding:12px 22px;cursor:pointer;color:#fff}
  .start{background:#2563eb}.stop{background:#475569}
  .tog{background:#334155}.tog.on{background:#059669}
+ .normal{background:#7c3aed}.normal.on{background:#b45309}
  button:disabled{opacity:.5;cursor:not-allowed}
  canvas{background:#131f36;border:1px solid #274060;border-radius:14px;width:100%;margin-top:8px}
  .legend{font-size:13px;color:#94a3b8;margin-top:6px}
@@ -216,11 +248,13 @@ PAGE = r"""<!DOCTYPE html>
   <div class="card"><div class="label">Packets hitting NIC</div><div class="value nic" id="nic">--</div><div class="label">per second (before XDP)</div></div>
   <div class="card"><div class="label">Packets reaching app</div><div class="value app" id="app">--</div><div class="label">per second (after XDP)</div></div>
   <div class="card"><div class="label">Drop rate</div><div class="value drop" id="drop">--</div><div class="label">dropped at the NIC</div></div>
+  <div class="card"><div class="label">Normal traffic (legit)</div><div class="value" id="normal" style="font-size:22px">idle</div><div class="label">must NOT be dropped</div></div>
 </div>
 
 <div class="controls">
   <button class="start" id="floodBtn" onclick="toggleFlood()">Start 2-minute Flood</button>
   <button class="tog" id="filterBtn" onclick="toggleFilter()">Filter: OFF</button>
+  <button class="normal" id="normalBtn" onclick="toggleNormal()">Start Normal Traffic</button>
 </div>
 <div class="status">Flood: <span id="floodState">idle</span> &nbsp;|&nbsp; Countdown: <span id="cd">--</span>s &nbsp;|&nbsp; Filter: <span id="fpill" class="pill off">OFF</span></div>
 
@@ -235,6 +269,7 @@ function nf(n){return (n||0).toLocaleString();}
 async function getState(){const r=await fetch('/api/state');return r.json();}
 async function toggleFilter(){const s=await getState();await fetch('/api/filter/'+(s.filter_on?'off':'on'),{method:'POST'});refresh();}
 async function toggleFlood(){const s=await getState();await fetch('/api/flood/'+(s.flood_running?'stop':'start'),{method:'POST'});refresh();}
+async function toggleNormal(){const s=await getState();await fetch('/api/normal/'+(s.normal_running?'stop':'start'),{method:'POST'});refresh();}
 
 function draw(){
  const c=document.getElementById('chart'),ctx=c.getContext('2d');
@@ -266,6 +301,13 @@ async function refresh(){
   document.getElementById('cd').textContent=s.flood_running?s.flood_remaining:'--';
   document.getElementById('floodBtn').textContent=s.flood_running?'Stop Flood':'Start 2-minute Flood';
   document.getElementById('floodBtn').className=s.flood_running?'stop':'start';
+  const nb=document.getElementById('normalBtn');
+  nb.textContent=s.normal_running?'Stop Normal Traffic':'Start Normal Traffic';
+  nb.className='normal'+(s.normal_running?' on':'');
+  const nel=document.getElementById('normal');
+  nel.textContent=s.normal_status;
+  if(s.normal_running && s.normal_loss!==null){nel.style.color=s.normal_loss>5?'#f87171':'#34d399';}
+  else{nel.style.color='#e2e8f0';}
   hist=s.history||[];draw();
  }catch(e){}
 }
@@ -307,6 +349,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     threading.Thread(target=flood_loop, daemon=True).start()
                 elif want == "stop":
                     state["flood_running"] = False
+            self._send(json.dumps({"ok": True}), "application/json")
+        elif self.path.startswith("/api/normal/"):
+            want = self.path.rsplit("/", 1)[-1]
+            with lock:
+                if want == "start" and not state["normal_running"]:
+                    state["normal_running"] = True
+                    state["normal_status"] = "running..."
+                    threading.Thread(target=normal_loop, daemon=True).start()
+                elif want == "stop":
+                    state["normal_running"] = False
             self._send(json.dumps({"ok": True}), "application/json")
         else:
             self.send_response(404); self.end_headers()
