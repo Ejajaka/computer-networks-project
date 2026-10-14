@@ -95,6 +95,14 @@ docs/
 
 ## 4. Quick way to run it
 
+**Interactive live simulator (browser UI):**
+```bash
+make -C engine                 # build the filters (first time only)
+bash sim/start_ui.sh           # start the simulator
+# open http://localhost:8090  ->  click "Start 2-minute Flood",
+# then toggle the filter ON/OFF and watch the effect live
+```
+
 **Easiest — one command does everything:**
 ```bash
 make -C engine                    # build the filters (first time only)
