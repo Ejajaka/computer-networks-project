@@ -1,11 +1,8 @@
 #!/usr/bin/env bash
-# Attach/detach the UDP filter on the victim's eth0.
-# usage: ctl_udp.sh <on|off>
-
 set -euo pipefail
 ACTION="${1:-on}"
 
-# find bpftool (path varies with linux-tools version)
+# Find the loader used to load the compiled UDP filter.
 find_bpf() {
   docker exec victim bash -c \
     'B=$(ls /usr/lib/linux-tools/*/bpftool 2>/dev/null | head -1); [ -n "$B" ] && echo "$B" || echo bpftool'
@@ -13,7 +10,7 @@ find_bpf() {
 BPF="$(find_bpf)"
 
 if [ "$ACTION" = "on" ]; then
-  # load, pin, and attach the filter to eth0
+  # ON flow: remove old pin -> load filter -> pin it -> attach to eth0.
   docker exec victim bash -c "
     rm -rf /sys/fs/bpf/udp
     $BPF prog loadall /tmp/udp_filter_kern.o /sys/fs/bpf/udp
@@ -21,7 +18,7 @@ if [ "$ACTION" = "on" ]; then
   " 2>/dev/null
   echo "UDP filter ON (attached to victim eth0)"
 else
-  # detach the filter and remove pinned files
+  # OFF flow: detach the filter -> remove its pinned files.
   docker exec victim bash -c "
     ip link set dev eth0 xdp off
     rm -rf /sys/fs/bpf/udp

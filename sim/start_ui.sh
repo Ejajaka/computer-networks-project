@@ -1,17 +1,26 @@
 #!/usr/bin/env bash
-# Start the live DDoS mitigation Simulator UI.
-# Usage:  bash sim/start_ui.sh
-set -euo pipefail
+# Start the live DDoS mitigation simulator.
+#
+# Simple flow:
+#   1. Stop an older ui_server.py process.
+#   2. Start sim/ui_server.py in the background.
+#   3. Wait until the Python web server answers /api/state.
+#   4. Tell the user to open http://localhost:8090.
+#
+# The actual simulation logic is in ui_server.py; this file only starts it.
+# Usage: bash sim/start_ui.sh
+set -euo pipefail  #makes the script stop of there is some command that fails or some variable missing
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-LOG="/tmp/sim_ui.log"
+LOG="/tmp/sim_ui.log"  # for logging
 
-# stop any previous instance (without killing our own shell)
+# Step 1: remove an old simulator process, if one is still running.
 pkill -f "sim/ui_server.py" 2>/dev/null || true
 sleep 1
 
+# Step 2: start the Python backend. It serves the page and controls the test.
 setsid nohup python3 -u "$DIR/ui_server.py" > "$LOG" 2>&1 < /dev/null &
 
-# prepare() can take a while (starts containers, installs missing tools)
+# Step 3: prepare() can take a while, so keep checking the health endpoint.
 ready=0
 for _ in $(seq 1 20); do
   if curl -s -m 2 http://localhost:8090/api/state >/dev/null 2>&1; then
@@ -21,6 +30,7 @@ for _ in $(seq 1 20); do
   sleep 1
 done
 
+# Step 4: report whether the backend is ready for the browser.
 if [ "$ready" = "1" ]; then
   echo "Simulator UI running:  http://localhost:8090"
   echo "Open that URL in your browser."

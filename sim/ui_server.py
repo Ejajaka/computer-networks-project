@@ -1,5 +1,23 @@
 #!/usr/bin/env python3
-"""Live DDoS simulator: floods the victim, toggles the XDP filter, shows live stats.
+"""Backend for the live DDoS simulator.
+
+Simple flow:
+
+    browser button
+        -> HTTP request to this file
+        -> start/stop a flood or attach/detach XDP
+        -> XDP handles every incoming packet
+        -> this file reads the counters every second
+        -> browser receives JSON and updates the page
+
+This file also contains the complete browser page in PAGE below. Therefore the
+simulator has two files: start_ui.sh starts this file, and this file runs the
+backend plus the embedded HTML/CSS/JavaScript frontend.
+
+The real packet decision is made by engine/ddos_filter_kern.c, compiled into
+ddos_filter_kern.o. This Python file controls that filter, reads its stats_map,
+calculates the displayed model result, and serves the browser.
+
 Run: python3 sim/ui_server.py   ->   http://localhost:8090
 """
 import http.server
@@ -14,11 +32,13 @@ PORT = 8090
 VICTIM = "victim"
 ATTACKER = "attacker"
 VICTIM_IP = "172.30.0.10"
-PIN = "/sys/fs/bpf/ddos/xdp"
+PIN = "/sys/fs/bpf/ddos/xdp"  #filesystem path where the loaded eBPF program is pinned.
 FLOOD_SECONDS = 120          # 2 minutes continuous flood
 HISTORY = 120                # samples kept for the chart
 
 # ---------------------------------------------------------------- state
+# Shared state is read by the HTTP thread and written by the poller/worker
+# threads. The lock prevents the browser from seeing half-updated values.
 lock = threading.Lock()
 flood_lock = threading.Lock()
 state = {
@@ -27,10 +47,10 @@ state = {
     "flood_gen": 0,           # invalidates stale flood threads
     "flood_remaining": 0,
     "filter_on": False,
-    "nic_pps": 0,
-    "app_pps": 0,
-    "drop_pct": 0.0,
-    "seen_total": 0,
+    "nic_pps": 0,  # packets reaching NIC
+    "app_pps": 0,  # packets reaching application
+    "drop_pct": 0.0,  # drop percentage
+    "seen_total": 0,  # total packets to be seen
     "normal_running": False,
     "normal_status": "idle",
     "normal_loss": None,
@@ -40,42 +60,50 @@ state = {
 
 
 # ---------------------------------------------------------------- helpers
+# These helpers are the bridge between Python and the running test environment.
+# They run commands, read packet counters, and check whether XDP is attached.
 def sh(cmd, timeout=15):
     """Run a shell command, return stdout."""
+    # Python sends a command to the test environment and collects its output.
     try:
         return subprocess.run(cmd, shell=True, capture_output=True,
-                              text=True, timeout=timeout).stdout
+                              text=True, timeout=timeout).stdout             #runs shell command and returns its output
     except Exception:
         return ""
 
 
 def bpf_path():
+    # Find the bpftool executable used to load/read the eBPF program.
     out = sh(f"docker exec {VICTIM} bash -c "
              f"'ls /usr/lib/linux-tools/*/bpftool 2>/dev/null | head -1'").strip()
     return out or "bpftool"
 
 
 def read_nic_pkts():
+    # Read packets received by the network card, before XDP filtering.
     out = sh(f"docker exec {VICTIM} bash -c "
              f"'cat /proc/net/dev | grep eth0 | awk \"{{print \\$3}}\"'").strip()
     return int(out) if out.isdigit() else None
 
 
 def read_app_pkts():
-    # Ip: InReceives (field 4 on the value line) -> counts packets AFTER XDP
+    # Read packets that reached the normal network stack, after XDP filtering.
     out = sh(f"docker exec {VICTIM} bash -c "
              f"'grep \"^Ip:\" /proc/net/snmp | tail -1 | awk \"{{print \\$4}}\"'").strip()
     return int(out) if out.isdigit() else None
 
 
 def read_xdp_stats():
-    """Read the filter's stats_map (real counters kept by the eBPF program)."""
+    """Read stats_map: counters written by the real eBPF/XDP program."""
+    # Ask the kernel for the counters produced by ddos_filter_kern.c.
     bpf = bpf_path()
     out = sh(f"docker exec {VICTIM} bash -c "
              f"'{bpf} map dump name stats_map 2>/dev/null'")
+    # Extract only the fields needed by the backend model.
     fields = ("udp_total", "udp_dropped", "udp_alerted",
               "syn_total", "syn_dropped", "syn_alerted")
     vals = {}
+    # Add values from all CPUs because stats_map is a per-CPU map.
     for name, value in re.findall(r'"(' + "|".join(fields) + r')":\s*(\d+)', out):
         vals[name] = vals.get(name, 0) + int(value)
     return vals or None
@@ -88,20 +116,26 @@ SYN_THRESHOLD = 200
 def build_model(xdp, prev_xdp, dt, attached):
     """Run the rate-limiter model on the server side, using real XDP counters.
 
-    Returns the same PASS/DROP decision the kernel takes, but computed here in
-    Python from the counters the kernel exported through stats_map.
+    The kernel performs the real drop. This function only reproduces the
+    decision for the dashboard using the counters exported through stats_map.
     """
     if not attached:
+        # XDP is OFF, so there is no active kernel filter decision.
         return {"source": "docker+xdp", "attached": False}
     if not xdp:
+        # The filter is attached but its counters are not available yet.
         return None
     if not prev_xdp:
+        # Use the first reading as the starting point, not as new traffic.
         prev_xdp = xdp
 
     def delta(name):
+        # Counters are cumulative; subtract the previous reading to get this
+        # second's traffic.
         return max(xdp.get(name, 0) - prev_xdp.get(name, 0), 0)
 
     def entry(prefix, threshold):
+        # Build the displayed result for one protocol: UDP or SYN.
         seen = delta(f"{prefix}_total")
         dropped = delta(f"{prefix}_dropped")
         rate = int(round(seen / dt))
@@ -114,6 +148,7 @@ def build_model(xdp, prev_xdp, dt, attached):
             "drop_pct": round(100.0 * dropped / seen, 1) if seen else 0.0,
         }
 
+    # This object is placed in state and sent to the browser as JSON.
     return {
         "source": "docker+xdp",
         "attached": True,
@@ -133,35 +168,43 @@ PROJECT_DIR = None  # set in __main__
 
 
 def prepare():
-    """Make sure containers run, tools exist, program is copied, server is up."""
+    """Prepare the target, copy the compiled filter, and start its service."""
+    # Find the project root so the backend can locate the compiled .o file.
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # project root
+    # Make sure the target services are running before the UI accepts requests.
     sh("docker start victim attacker benign")
-    # install tools in victim if missing
+    # The backend needs iptables and bpftool to control/read the filter.
     sh(f"docker exec {VICTIM} bash -c 'command -v iptables >/dev/null 2>&1 || "
        f"(apt-get update -qq && apt-get install -y -qq iptables) ; "
        f"ls /usr/lib/linux-tools/*/bpftool >/dev/null 2>&1 || "
        f"(apt-get update -qq && apt-get install -y -qq linux-tools-generic linux-tools-common)'")
-    # copy the compiled program (engine/ is the eBPF source dir)
+    # Copy the compiled eBPF program that will later be attached to eth0.
     src = f"{root}/engine/ddos_filter_kern.o"
     if not os.path.exists(src):
         src = f"{root}/ebpf/ddos_filter_kern.o"
+    # Copy the compiled filter into the target environment.
     sh(f"docker cp {src} {VICTIM}:/tmp/ddos_filter_kern.o")
-    # start the victim's service
+    # Start the service that represents the application receiving traffic.
     sh(f"docker exec -d {VICTIM} bash -c 'pkill -9 iperf3 2>/dev/null; iperf3 -s -p 5201'")
 
 
 def attach_filter():
+    # Load the eBPF object once, pin it, and attach its XDP entry point.
+    # First find the loader, then load/pin the program if it is not already loaded.
     bpf = bpf_path()
     # load (if needed) and attach
     sh(f"docker exec {VICTIM} bash -c '"
        f"if [ ! -e {PIN} ]; then rm -rf /sys/fs/bpf/ddos; "
        f"{bpf} prog loadall /tmp/ddos_filter_kern.o /sys/fs/bpf/ddos; fi; "
        f"ip link set dev eth0 xdp pinned {PIN}'")
+    # Return the actual attachment state for the browser.
     return filter_is_on()
 
 
 def detach_filter():
+    # Stop XDP processing; packets can then continue normally.
     sh(f"docker exec {VICTIM} bash -c 'ip link set dev eth0 xdp off'")
+    # Return the new state after detaching.
     return not filter_is_on()
 
 
@@ -173,31 +216,41 @@ def flood_kinds(mode):
 
 
 def start_flood(mode="udp"):
-    """Start 4 workers per kind: UDP (-2), SYN (-S), or both."""
+    """Start four UDP workers, four SYN workers, or four of each."""
+    # Remove old attack workers before starting the selected mode.
     sh(f"docker exec {ATTACKER} bash -c 'pkill -9 hping3 2>/dev/null; true'")
     for kind in flood_kinds(mode):
+        # A mode uses four workers so the traffic rate is high enough to show
+        # the difference between PASS and DROP.
         for _ in range(4):
             sh(f"docker exec -d {ATTACKER} hping3 {FLOOD_FLAGS[kind]} "
                f"-p 5201 --flood {VICTIM_IP}")
 
 
 def stop_flood():
+    # Stop all attack workers in the attacker process.
     sh(f"docker exec {ATTACKER} bash -c 'pkill -9 hping3 2>/dev/null; true'")
 
 
 # ---------------------------------------------------------------- poller thread
+# This is the measurement loop shown in the flowchart. It runs once per second:
+# NIC counter -> application counter -> XDP stats -> backend model -> state.
 def poll_loop():
+    # Save the first counter readings. Later readings are compared with these.
     prev_nic = read_nic_pkts()
     prev_app = read_app_pkts()
     prev_xdp = read_xdp_stats()
     last_t = time.time()
     while True:
+        # The dashboard is refreshed once per second.
         time.sleep(1)
+        # Read the new packet and XDP counter values.
         now = read_nic_pkts()
         app = read_app_pkts()
         xdp = read_xdp_stats()
         t = time.time()
         dt = max(t - last_t, 0.001)
+        # Convert cumulative NIC/application counters into packets per second.
         if now is not None and prev_nic is not None:
             nic_pps = int((now - prev_nic) / dt)
         else:
@@ -207,17 +260,21 @@ def poll_loop():
         else:
             app_pps = 0
 
+        # Check whether packets are currently passing through XDP.
         on = filter_is_on()
-        # backend model: decide PASS/DROP from the kernel's real counters
+        # The Python model reads real kernel counters and prepares the dashboard
+        # verdict. The C/XDP program has already made the actual packet decision.
         model = build_model(xdp, prev_xdp, dt, on)
         if xdp is not None:
             prev_xdp = xdp
+        # Make the current readings the previous readings for the next loop.
         prev_nic, prev_app, last_t = now, app, t
 
         drop = 0.0
         if on and nic_pps > 0:
             drop = round(100.0 * max(nic_pps - app_pps, 0) / nic_pps, 1)
 
+        # Publish the new values for the browser and chart.
         with lock:
             state["filter_on"] = on
             state["nic_pps"] = nic_pps
@@ -231,6 +288,8 @@ def poll_loop():
 
 
 # ---------------------------------------------------------------- flood thread
+# This worker keeps the selected UDP/SYN/both attack alive for two minutes and
+# replaces workers if one exits early.
 def flood_loop(mode, gen):
     """Keeps one kind of flood (udp or syn) running for FLOOD_SECONDS."""
     def still_current():
@@ -238,23 +297,26 @@ def flood_loop(mode, gen):
             return (state["flood_gen"] == gen and state["flood_running"]
                     and state["flood_mode"] == mode)
 
+    # Decide how many UDP and SYN workers this mode should maintain.
     targets = {"udp": 4, "syn": 4} if mode == "both" else {mode: 4}
     end = time.time() + FLOOD_SECONDS
     with flood_lock:
         if not still_current():
             return
+        # Start the selected attack only if this is still the latest request.
         start_flood(mode)
     while time.time() < end:
         with lock:
             if (state["flood_gen"] != gen or not state["flood_running"]
                     or state["flood_mode"] != mode):
                 return
+            # Update the countdown shown in the browser.
             state["flood_remaining"] = int(end - time.time())
         time.sleep(1)
         with flood_lock:
             if not still_current():
                 return
-            # keep the right number of each worker type alive
+            # Keep the right number of each worker type alive.
             out = sh(f"docker exec {ATTACKER} bash -c 'pgrep -af hping3 || true'")
             counts = {"udp": 0, "syn": 0}
             for line in out.splitlines():
@@ -265,6 +327,7 @@ def flood_loop(mode, gen):
                 elif " -S " in line:
                     counts["syn"] += 1
             for kind, target in targets.items():
+                # Restart only the missing type: UDP or SYN.
                 for _ in range(max(target - counts.get(kind, 0), 0)):
                     sh(f"docker exec -d {ATTACKER} hping3 {FLOOD_FLAGS[kind]} "
                        f"-p 5201 --flood {VICTIM_IP}")
@@ -272,6 +335,7 @@ def flood_loop(mode, gen):
         with lock:
             if state["flood_gen"] != gen:
                 return
+            # The two-minute attack ended naturally, so reset its state.
             state["flood_running"] = False
             state["flood_mode"] = None
             state["flood_remaining"] = 0
@@ -280,6 +344,8 @@ def flood_loop(mode, gen):
 
 
 # ---------------------------------------------------------------- normal traffic
+# This worker represents a legitimate user. Its traffic should remain below
+# the limit and should pass when the filter is ON.
 def normal_loop():
     """Runs a legitimate user's traffic (iperf3 from benign) in a loop and
     reports the packet loss. Normal traffic should NOT be dropped."""
@@ -287,6 +353,7 @@ def normal_loop():
         with lock:
             if not state["normal_running"]:
                 break
+        # Send a small legitimate stream and read its JSON result.
         out = sh(f"docker exec benign iperf3 -c {VICTIM_IP} -p 5201 -u -b 3M "
                  f"-t 4 --json", timeout=20)
         try:
@@ -294,6 +361,7 @@ def normal_loop():
             s = j["end"]["sum"]
             loss = round(s.get("lost_percent", 0.0), 1)
             mbps = s.get("bits_per_second", 0) / 1e6
+            # Save the normal user's speed and packet loss for the page.
             with lock:
                 state["normal_loss"] = loss
                 state["normal_status"] = f"{mbps:.1f} Mbps, {loss:.1f}% loss"
@@ -307,7 +375,9 @@ def normal_loop():
         state["normal_loss"] = None
 
 
-# ---------------------------------------------------------------- HTTP
+# ---------------------------------------------------------------- HTTP page
+# PAGE is the frontend. It is embedded here, so no separate web frontend file
+# is needed for this simulator.
 PAGE = r"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
 <title>DDoS Mitigation Simulator</title>
@@ -371,13 +441,18 @@ PAGE = r"""<!DOCTYPE html>
 <script>
 let hist=[];
 function nf(n){return (n||0).toLocaleString();}
+// Ask the Python backend for the latest shared state.
 async function getState(){const r=await fetch('/api/state');return r.json();}
+// Browser button -> backend HTTP request. The browser only requests actions;
+// Python performs them and returns the resulting state.
+// These functions do not generate packets themselves.
 async function toggleFilter(){const s=await getState();await fetch('/api/filter/'+(s.filter_on?'off':'on'),{method:'POST'});refresh();}
 async function startFlood(mode){await fetch('/api/flood/'+mode,{method:'POST'});refresh();}
 async function stopFlood(){await fetch('/api/flood/stop',{method:'POST'});refresh();}
 async function toggleNormal(){const s=await getState();await fetch('/api/normal/'+(s.normal_running?'stop':'start'),{method:'POST'});refresh();}
 
 function draw(){
+ // Draw the NIC and application rates calculated by the backend.
  const c=document.getElementById('chart'),ctx=c.getContext('2d');
  const w=c.width=c.clientWidth, h=c.height;
  ctx.clearRect(0,0,w,h);
@@ -395,6 +470,7 @@ function draw(){
 }
 async function refresh(){
  try{
+  // Poll the Python backend every second and redraw the values it computed.
   const s=await getState();
   document.getElementById('nic').textContent=nf(s.nic_pps);
   document.getElementById('app').textContent=nf(s.app_pps);
@@ -421,6 +497,7 @@ async function refresh(){
   if(s.normal_running && s.normal_loss!==null){nel.style.color=s.normal_loss>5?'#f87171':'#34d399';}
   else{nel.style.color='#e2e8f0';}
   const m=s.model||null;
+  // Display the backend model result; do not recalculate it in the browser.
   function mset(rateId,stateId,metaId,data,meta){
     const re=document.getElementById(rateId),se=document.getElementById(stateId),me=document.getElementById(metaId);
     if(!m||!m.attached||!data){re.textContent='--';se.textContent=(m&&!m.attached)?'OFF':'no data';se.style.color='#94a3b8';me.textContent=meta;return;}
@@ -442,6 +519,8 @@ setInterval(refresh,1000);refresh();
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
+    # This handler is the browser/backend connection: GET reads state and
+    # POST starts/stops floods, normal traffic, and the XDP filter.
     def _send(self, body, ctype="text/html"):
         b = body.encode()
         self.send_response(200)
@@ -451,6 +530,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(b)
 
     def do_GET(self):
+        # Browser GET requests read the current state or request the page.
         if self.path == "/api/state":
             with lock:
                 data = dict(state)
@@ -463,6 +543,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._send(PAGE)
 
     def do_POST(self):
+        # Browser POST requests perform actions: filter, flood, or normal traffic.
         if self.path.startswith("/api/filter/"):
             want = self.path.rsplit("/", 1)[-1]
             if want == "on":
@@ -473,6 +554,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         elif self.path.startswith("/api/flood/"):
             want = self.path.rsplit("/", 1)[-1]
             if want == "stop":
+                # Invalidate the current flood worker before stopping it.
                 with flood_lock:
                     with lock:
                         state["flood_running"] = False
@@ -482,6 +564,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     stop_flood()
                 ok = True
             elif want in ("udp", "syn", "both"):
+                # Allow only one selected flood mode at a time.
                 with lock:
                     ok = not state["flood_running"]
                     if ok:
@@ -501,6 +584,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             want = self.path.rsplit("/", 1)[-1]
             with lock:
                 if want == "start" and not state["normal_running"]:
+                    # Start the legitimate-traffic worker in the background.
                     state["normal_running"] = True
                     state["normal_status"] = "running..."
                     threading.Thread(target=normal_loop, daemon=True).start()
@@ -515,6 +599,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
+    # Startup order: prepare the target, start measurements, then serve browser
+    # requests on port 8090.
     prepare()
     threading.Thread(target=poll_loop, daemon=True).start()
     print(f"Simulator UI:  http://localhost:{PORT}")
