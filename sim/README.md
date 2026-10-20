@@ -10,6 +10,12 @@ you can **toggle the eBPF/XDP filter ON/OFF live** to see the difference in real
 | **Packets hitting NIC** | packets arriving at the victim's network card (before XDP) |
 | **Packets reaching app** | packets delivered to the IP stack **after** XDP — this crashes to near zero when the filter is ON |
 | **Drop rate** | % of packets the filter threw away at the NIC |
+| **Backend model** | UDP/SYN rate read from the kernel's `stats_map`, with the PASS/DROP decision computed in Python |
+
+The rate-limiter model runs **on the server**, not in the browser. `poll_loop()` reads
+the real XDP counters from the victim (`bpftool map dump name stats_map`), compares the
+per-second rate against 800 pkt/s (UDP) and 200/s (SYN), and exposes the result at
+`GET /api/model`. The page only renders what the backend decided.
 
 ## How to run
 
@@ -26,9 +32,10 @@ pkill -f sim/ui_server.py
 
 ## How to use it
 
-1. Click **Start 2-minute Flood** — the attacker begins flooding continuously.
+1. Click **Start UDP Flood**, **Start SYN Flood**, or **Start Both Floods** — runs
+   that attack for 2 minutes. Press **Stop Flood** to end it early.
 2. Watch the numbers. With the filter **OFF**, "packets reaching app" is high (the
-   flood reaches the victim).
+   flood reaches the victim). The backend model shows the matching UDP or SYN rate.
 3. Click the **Filter** button to turn it **ON** — "packets reaching app" drops to
    near zero and the drop rate shows ~99.8%.
 4. Toggle it **OFF** and **ON** again to compare live.

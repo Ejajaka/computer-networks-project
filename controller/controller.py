@@ -1,55 +1,32 @@
 #!/usr/bin/env python3
-"""
-User-space controller (paper section 3.2, mitigation logic part 2).
-
-The "security guard" that reacts to alerts. The user-space half of the defence:
-  - the XDP filter (kernel, C) is the FAST part - drops flood packets instantly,
-    but it's tiny and can't do complicated things
-  - this controller (Python) is the SLOW-but-SMART part - reads the filter's
-    alert message, then sets up a permanent block for that source IP.
-
-Analogy: the XDP filter is the bouncer turning people away at the door; the
-controller is the manager who writes the troublemaker's name on a banned list.
-
-Reads the kernel trace_pipe for eBPF alert messages, extracts the malicious
-source IP, and applies a persistent block (iptables) inside the victim container,
-plus logs each alert.
-
-Run on the host with the victim container's eBPF/XDP filter active.
-"""
+"""Reads filter alerts, blocks the source IP with iptables, and logs it."""
+import os
 import re
 import subprocess
 import sys
 import time
 from datetime import datetime
 
-# A special file in Linux where eBPF programs can print messages (via bpf_printk).
-# Reading it is like listening to the kernel's notice board.
+# kernel trace pipe where bpf_printk messages appear
 TRACE_PIPE = "/sys/kernel/tracing/trace_pipe"
-VICTIM = "victim"   # the container name to protect
-LOG_FILE = "/home/sanjeev/Desktop/CN/results/alerts.log"   # where alerts are saved (hardcoded)
+VICTIM = "victim"   # container to protect
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+LOG_FILE = os.path.join(BASE_DIR, "results", "alerts.log")   # alert log
 
-# Safety list of IPs that must NEVER be blocked: the victim itself (.10),
-# the Docker gateway (.1), and localhost. Without it, a mistake could block
-# our own network.
+# IPs that must never be blocked
 SELF_IPS = {"172.30.0.10", "172.30.0.1", "127.0.0.1"}
 
-# A regular expression (text-search pattern): matches lines containing
-# "UDP FLOOD" or "SYN FLOOD", then "DETECTED from", then an IP address.
-# It captures two pieces: the type of flood and the IP.
+# matches "UDP/SYN FLOOD DETECTED from <ip>"
 ALERT_RE = re.compile(
     r"(UDP FLOOD|SYN FLOOD) DETECTED from (\d+\.\d+\.\d+\.\d+)"
 )
 
-# Memory of IPs already blocked, so the same IP isn't blocked over and over.
-# (a set holds each item only once)
+# IPs already blocked
 BLOCKED = set()
 
 
 def run(cmd, sudo=False):
-    """Helper: run a shell command from Python and return (exit code, output).
-    If sudo=True it adds `sudo -S` in front. Has a 30-second timeout and
-    catches errors so the program doesn't crash."""
+    """Run a shell command and return (exit code, output)."""
     if sudo:
         cmd = ["sudo", "-S"] + cmd
     try:
@@ -60,48 +37,37 @@ def run(cmd, sudo=False):
 
 
 def block_ip(ip):
-    """Persistent block via iptables INSIDE the victim container.
-    Runs: docker exec victim iptables -A INPUT -s <ip> -j DROP
-      - docker exec victim   -> run the command inside the victim container
-      - iptables -A INPUT    -> append a rule to the incoming-traffic list
-      - -s <ip>              -> match packets from that source IP
-      - -j DROP              -> silently discard them
-    Returns True if the command succeeded.
-    (Note: no sudo here, so the controller itself must run with enough
-    privileges - start_controller.sh handles that by starting it with sudo.)"""
+    """Add an iptables DROP rule for this IP inside the victim."""
     rule = ["docker", "exec", VICTIM, "iptables", "-A", "INPUT", "-s", ip, "-j", "DROP"]
     rc, out = run(rule)
     return rc == 0
 
 
 def log(msg):
-    """Add a timestamp, print to screen, and append to alerts.log.
-    That's the audit trail you see in Step 7 of demo.sh."""
+    """Print a timestamped line and append it to alerts.log."""
     line = f"[{datetime.now().isoformat()}] {msg}"
     print(line, flush=True)
+    os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
     with open(LOG_FILE, "a") as f:
         f.write(line + "\n")
 
 
 def main():
     print(f"Controller started. Monitoring {TRACE_PIPE} (Ctrl+C to stop)")
-    # Open the trace pipe and read it line by line, FOREVER.
-    # The read waits until the kernel writes something new.
+    # read the trace pipe forever
     with open(TRACE_PIPE, "r") as tp:
         for line in tp:
-            # Check if the line matches the alert pattern. If not, skip it.
+            # only act on flood alerts
             m = ALERT_RE.search(line)
             if not m:
                 continue
-            # Pull out the flood type and the IP.
             kind, ip = m.group(1), m.group(2)
-            # Skip if the IP is one of our own (never block yourself).
+            # never block our own IPs
             if ip in SELF_IPS:
                 continue
-            # Skip if the IP is already blocked (already handled).
+            # skip already-blocked IPs
             if ip in BLOCKED:
                 continue
-            # Otherwise: remember it, log "detected", block it, then log the result.
             BLOCKED.add(ip)
             log(f"{kind} detected from {ip} -- blocking via iptables")
             if block_ip(ip):
@@ -111,7 +77,6 @@ def main():
 
 
 if __name__ == "__main__":
-    # When run directly, call main(). Ctrl+C exits cleanly.
     try:
         main()
     except KeyboardInterrupt:

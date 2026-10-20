@@ -78,7 +78,7 @@ int xdp_ddos_filter(struct xdp_md *ctx)
     struct stats *st = bpf_map_lookup_elem(&stats_map, &key);
 
     if (ip->protocol == IPPROTO_UDP) {
-        /* ---------- UDP flood detection (per-source packet rate) ---------- */
+        // UDP branch
         struct udphdr *udp = (void *)(ip + 1);
         if ((void *)(udp + 1) > data_end)
             return XDP_PASS;
@@ -113,12 +113,12 @@ int xdp_ddos_filter(struct xdp_md *ctx)
     }
 
     if (ip->protocol == IPPROTO_TCP) {
-        /* ---------- SYN flood detection (per-source connection rate) ---------- */
+        // SYN branch
         struct tcphdr *tcp = (void *)(ip + 1);
         if ((void *)(tcp + 1) > data_end)
             return XDP_PASS;
 
-        /* Only new connection attempts (SYN set, ACK clear) */
+        // only SYN without ACK
         if (!(tcp->syn) || tcp->ack)
             return XDP_PASS;
 
@@ -151,7 +151,7 @@ int xdp_ddos_filter(struct xdp_md *ctx)
         return XDP_PASS;
     }
 
-    /* Non-UDP/TCP (ICMP, etc.) passes */
+    // other protocols pass
     return XDP_PASS;
 }
 

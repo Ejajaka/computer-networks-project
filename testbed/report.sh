@@ -1,22 +1,7 @@
 #!/usr/bin/env bash
-# =============================================================================
-# FORMAL TEST REPORT
-# DDoS Detection & Mitigation using eBPF and XDP
-# Compares results WITH and WITHOUT the eBPF/XDP filter.
-# Usage:  sudo bash report.sh
-#
-# The polished version of the demo. Reproduces a paper (Tolay et al., 2025)
-# and extends it with SYN floods. For both UDP and SYN floods it measures
-# TWICE - without and with the filter - and compares:
-#   packets that reached the victim,
-#   packets dropped by XDP,
-#   host CPU during the flood,
-#   ping latency.
-# At the end it prints a summary table and a legitimate-traffic test.
-#
-# NOTE: the summary text hardcodes "~99%" no matter what the numbers actually
-# turn out to be - check the real numbers in the table.
-# =============================================================================
+# Formal test report: compares UDP/SYN floods with and without the filter.
+# Usage: sudo bash report.sh
+# Note: the summary text hardcodes "~99%" - check the actual table.
 set -uo pipefail
 
 VICTIM_IP=172.30.0.10
@@ -24,7 +9,7 @@ ATTACKER_IP=172.30.0.20
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DURATION=8                     # seconds per flood scenario
 
-# ---------------- helpers ---------------------------------------------------
+# helpers
 bpf_path() {
   docker exec victim bash -c \
     'ls /usr/lib/linux-tools/*/bpftool 2>/dev/null | head -1 || echo bpftool'
@@ -77,8 +62,7 @@ attack() {      # attack <udp|syn>  (launches flood for DURATION seconds)
 }
 
 run_with_cpu() {   # run_with_cpu <udp|syn>  -> "CPU_AVG rx_delta"
-  # runs the attack in the background, samples host CPU while it runs,
-  # then reports average CPU and the NIC rx-packet delta
+  # run the attack and sample host CPU meanwhile
   local mode="$1"
   local r1 r2 cpusum n
   r1=$(rx_pkts); cpusum=0; n=0
@@ -95,7 +79,7 @@ run_with_cpu() {   # run_with_cpu <udp|syn>  -> "CPU_AVG rx_delta"
 
 fmt() { python3 -c "print(f'{int($1):,}')"; }   # add commas to big numbers (e.g. 1234567 -> 1,234,567)
 
-# ---------------- one scenario: measure without/with filter ------------------
+# compare one scenario without/with filter
 scenario() {    # scenario <udp|syn>
   local mode="$1" label
   [ "$mode" = "udp" ] && label="UDP FLOOD" || label="SYN FLOOD"
@@ -147,7 +131,7 @@ scenario() {    # scenario <udp|syn>
   echo "---------------------------------------------------------------------------------"
 }
 
-# ---------------- main -------------------------------------------------------
+# main
 echo ""
 echo "═════════════════════════════════════════════════════════════════════════════════"
 echo "   FORMAL TEST REPORT"
@@ -192,8 +176,7 @@ echo "════════════════════════�
 echo "   SUMMARY OF RESULTS"
 echo "═════════════════════════════════════════════════════════════════════════════════"
 echo ""
-# NOTE: this text hardcodes "~99%" even if the actual numbers differ -
-# trust the table above, not this sentence.
+# this text is hardcoded - trust the table above
 echo "   The eBPF/XDP filter drops ~99% of both UDP and SYN flood traffic at the"
 echo "   earliest point in the network stack, while legitimate traffic passes with"
 echo "   0% loss. This matches the published result (~99%) and extends it to SYN floods."

@@ -37,25 +37,26 @@ struct {
 SEC("xdp")
 int xdp_udp_filter(struct xdp_md *ctx)
 {
-    // Packet arrives
     void *data_end = (void *)(long)ctx->data_end;
     void *data = (void *)(long)ctx->data;
 
+    // Ethernet header
     struct ethhdr *eth = data;
     if ((void *)(eth + 1) > data_end)
         return XDP_PASS;
 
-    // Is it IPv4?
+    // only IPv4
     if (eth->h_proto != bpf_htons(ETH_P_IP))
-        return XDP_PASS;  // PASS
+        return XDP_PASS;
 
+    // IP header
     struct iphdr *ip = (void *)(eth + 1);
     if ((void *)(ip + 1) > data_end)
         return XDP_PASS;
 
     __u32 src_ip = ip->saddr;
 
-    // Count packet
+    // count total packets
     __u32 key = 0;
     struct stats *st = bpf_map_lookup_elem(&stats_map, &key);
     if (st)
@@ -63,38 +64,37 @@ int xdp_udp_filter(struct xdp_md *ctx)
 
     __u64 now = bpf_ktime_get_ns();
 
-    // Is source IP already known?
+    // per-source-IP counter
     struct pkt_count *pc = bpf_map_lookup_elem(&rate_map, &src_ip);
     if (!pc) {
-        // Start count
+        // first packet from this IP
         struct pkt_count init = { .count = 1, .last_ts = now };
         bpf_map_update_elem(&rate_map, &src_ip, &init, BPF_ANY);
-        return XDP_PASS;  // PASS
+        return XDP_PASS;
     }
 
-    // Has 1 second passed?
+    // reset counter every 1 second
     if (now - pc->last_ts >= WINDOW_NS) {
-        // Reset count
         pc->last_ts = now;
         pc->count = 1;
-        return XDP_PASS;  // PASS
+        return XDP_PASS;
     }
 
-    // Increase count
     pc->count++;
-    // More than 800?
+
+    // over threshold: drop and log
     if (pc->count > RATE_THRESHOLD) {
         if (st) {
             __sync_fetch_and_add(&st->dropped, 1);
             __sync_fetch_and_add(&st->alerted, 1);
         }
+        // log about once per 1000 drops
         if (st && st->alerted % 1000 == 1)
             bpf_printk("UDP FLOOD DETECTED from %pI4 count=%llu\n", &src_ip, pc->count);
-        // DROP
         return XDP_DROP;
     }
 
-    return XDP_PASS;  // PASS
+    return XDP_PASS;
 }
 
 char _license[] SEC("license") = "GPL";

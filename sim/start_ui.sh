@@ -10,9 +10,18 @@ pkill -f "sim/ui_server.py" 2>/dev/null || true
 sleep 1
 
 setsid nohup python3 -u "$DIR/ui_server.py" > "$LOG" 2>&1 < /dev/null &
-sleep 3
 
-if curl -s -m 2 http://localhost:8090/api/state >/dev/null 2>&1; then
+# prepare() can take a while (starts containers, installs missing tools)
+ready=0
+for _ in $(seq 1 20); do
+  if curl -s -m 2 http://localhost:8090/api/state >/dev/null 2>&1; then
+    ready=1
+    break
+  fi
+  sleep 1
+done
+
+if [ "$ready" = "1" ]; then
   echo "Simulator UI running:  http://localhost:8090"
   echo "Open that URL in your browser."
   echo "Log: $LOG"

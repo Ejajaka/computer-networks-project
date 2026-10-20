@@ -1,0 +1,23 @@
+# First-time setup
+cd ~/Desktop/CN_project
+make -C engine
+sudo bash testbed/setup_testbed.sh
+
+# Web UI
+cd ~/Desktop/CN_project
+bash sim/start_ui.sh
+xdg-open http://localhost:8090
+pkill -f sim/ui_server.py
+
+# CLI demo
+cd ~/Desktop/CN_project
+sudo bash testbed/demo.sh
+
+# CLI formal report
+cd ~/Desktop/CN_project
+sudo bash testbed/report.sh
+
+# Stop leftover attack/filter processes
+docker exec attacker pkill -9 hping3 || true
+docker exec victim ip link set dev eth0 xdp off || true
+pkill -f sim/ui_server.py || true
