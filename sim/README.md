@@ -11,11 +11,17 @@ you can **toggle the eBPF/XDP filter ON/OFF live** to see the difference in real
 | **Packets reaching app** | packets delivered to the IP stack **after** XDP — this crashes to near zero when the filter is ON |
 | **Drop rate** | % of packets the filter threw away at the NIC |
 | **Backend model** | UDP/SYN rate read from the kernel's `stats_map`, with the PASS/DROP decision computed in Python |
+| **Resource utilization** | Victim CPU/memory load model and optional NVIDIA GPU usage |
 
 The rate-limiter model runs **on the server**, not in the browser. `poll_loop()` reads
 the real XDP counters from the victim (`bpftool map dump name stats_map`), compares the
 per-second rate against 800 pkt/s (UDP) and 200/s (SYN), and exposes the result at
 `GET /api/model`. The page only renders what the backend decided.
+
+The CPU and memory cards use a simple victim-load model based on packets reaching
+the application. This makes the resource cost avoided by XDP visible even when
+Docker does not charge host-kernel packet work to the victim container. GPU usage
+comes from `nvidia-smi` when available; otherwise the page shows `N/A`.
 
 ## How to run
 

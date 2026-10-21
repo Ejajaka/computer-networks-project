@@ -92,6 +92,10 @@
           |
           +--> Check filter status
           |
+          +--> Estimate victim CPU/memory from app packets
+          |
+          +--> Read optional GPU
+          |
           v
       build_model()
           |
@@ -107,6 +111,9 @@
        Save result in state
           |
           v
+       Save resources in state
+          |
+          v
  Browser calls /api/state
  every 1 second
           |
@@ -117,6 +124,9 @@
  - Drop percentage
  - UDP verdict
  - SYN verdict
+ - CPU usage
+ - Memory usage
+ - GPU usage or N/A
  - Live graph
 
 

@@ -83,22 +83,37 @@ ST=$((S1-S0)); SDD=$((SD1-SD0))
 awk -v t=$ST -v d=$SDD 'BEGIN{printf "    SYN: seen=%d dropped=%d  drop_rate=%.1f%%\n",t,d,(t?100*d/t:0)}'
 
 # ---------------------------------------------------------------------------
-say "Step 6: legitimate traffic test (should NOT be dropped)"
+say "Step 6: combined UDP + SYN flood test"
+read -r U0 UD0 S0 SD0 < <(read_stats)          # counters BEFORE
+# Start four UDP workers and four SYN workers at the same time.
+for i in 1 2 3 4; do docker exec -d attacker hping3 -2 -p 5201 --flood $VICTIM >/dev/null 2>&1; done
+for i in 1 2 3 4; do docker exec -d attacker hping3 -S -p 5201 --flood $VICTIM >/dev/null 2>&1; done
+# Run both attacks, stop them, then read the counters again.
+sleep 8
+docker exec attacker pkill -9 hping3 >/dev/null 2>&1 || true
+sleep 1
+read -r U1 UD1 S1 SD1 < <(read_stats)          # counters AFTER
+UT=$((U1-U0)); UDD=$((UD1-UD0)); ST=$((S1-S0)); SDD=$((SD1-SD0))
+awk -v t=$((UT+ST)) -v d=$((UDD+SDD)) 'BEGIN{printf "    Combined: seen=%d dropped=%d  drop_rate=%.1f%%\n",t,d,(t?100*d/t:0)}'
+
+# ---------------------------------------------------------------------------
+say "Step 7: legitimate traffic test (should NOT be dropped)"
 # normal user sends 3 Mbps for 5 s - extra drops should be 0
 read -r U0 UD0 S0 SD0 < <(read_stats)
-docker exec benign iperf3 -c $VICTIM -p 5201 -u -b 3M -t 5 >/dev/null 2>&1
+docker exec benign iperf3 -c $VICTIM -p 5201 -u -b 3M -t 4 >/dev/null 2>&1
 read -r U1 UD1 S1 SD1 < <(read_stats)
 UDD=$((UD1-UD0))
 echo "    benign UDP extra drops: $UDD  (expected: 0)"
 
 # ---------------------------------------------------------------------------
-say "Step 7: controller log (detections + blocks)"
+say "Step 8: controller log (detections + blocks)"
 cat /tmp/ddos_controller.log 2>/dev/null | grep -E "FLOOD|BLOCKED" || echo "    (no alerts)"
 
 # ---------------------------------------------------------------------------
 say "Done. Summary"
 echo "    UDP flood drop rate : see Step 4"
 echo "    SYN flood drop rate : see Step 5"
-echo "    Legit traffic drops : see Step 6 (expected 0)"
+echo "    Combined flood rate  : see Step 6"
+echo "    Legit traffic drops : see Step 7 (expected 0)"
 echo "    Full log            : /tmp/ddos_controller.log"
 echo "    Alerts log          : $PROJECT_DIR/results/alerts.log"

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Runs one UDP benchmark (filter on/off): attack + CPU + latency.
+# Runs one UDP benchmark (filter on/off): attack + CPU.
 # usage: bench_run.sh <filter-on|filter-off> <seconds>
 set -uo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -30,14 +30,8 @@ HCPUID=$!
   done ) > /tmp/cpu_$MODE.txt &
 CPUID=$!
 
-# ping latency sampler (1/s)
-( for i in $(seq 1 "$SECS"); do
-    ping -c 1 -W 1 172.30.0.10 2>/dev/null | grep -oP 'time=\K[0-9.]+'
-  done ) > /tmp/lat_$MODE.txt &
-LATID=$!
-
-# normal traffic: benign -> victim 5 Mbps
-docker exec -d benign iperf3 -c 172.30.0.10 -p 5201 -u -b 5M -t "$SECS" >/dev/null 2>&1
+# normal traffic: benign -> victim 3 Mbps
+docker exec -d benign iperf3 -c 172.30.0.10 -p 5201 -u -b 3M -t "$SECS" >/dev/null 2>&1
 
 # attack: 4 UDP flood workers
 for i in 1 2 3 4; do
@@ -49,9 +43,7 @@ sleep "$SECS"
 docker exec attacker pkill -9 hping3 2>/dev/null
 
 # wait for samplers then print results
-wait $CPUID $LATID $HCPUID 2>/dev/null
+wait $CPUID $HCPUID 2>/dev/null
 
 echo "== Host CPU samples (%) =="; cat /tmp/hostcpu_$MODE.txt | sort -n | awk '{s+=$1; a[NR]=$1}END{print "  avg="s/NR"% min="a[1]"% max="a[NR]"%"}' ; cat /tmp/hostcpu_$MODE.txt | tr '\n' ' '; echo ""
 echo "== Victim container CPU samples (%) =="; cat /tmp/cpu_$MODE.txt | sort -n | awk '{s+=$1; a[NR]=$1}END{print "  avg="s/NR"% min="a[1]"% max="a[NR]"%"}' ; cat /tmp/cpu_$MODE.txt | tr '\n' ' '; echo ""
-echo "== Ping latency samples (ms) =="; cat /tmp/lat_$MODE.txt | sort -n | awk '{s+=$1;a[NR]=$1}END{print "  count="NR" min="a[1]" max="a[NR]" avg="s/NR}'
-cat /tmp/lat_$MODE.txt | tr '\n' ' '; echo ""

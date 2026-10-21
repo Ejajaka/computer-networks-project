@@ -78,7 +78,7 @@ controller/
 testbed/
   setup_testbed.sh     # creates the fake network + victim/attacker/benign
   ctl_udp.sh           # turn the filter on/off inside the victim
-  bench_run.sh         # measures CPU and response time
+  bench_run.sh         # measures CPU during a UDP flood
   start_controller.sh  # starts the controller program
 results/
   UDP_results.md       # the measured results in detail

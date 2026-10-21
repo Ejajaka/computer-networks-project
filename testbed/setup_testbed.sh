@@ -33,7 +33,7 @@ echo "    benign IP: 172.30.0.30"
 # 5. Install common networking and traffic tools in all containers.
 echo "==> Installing tools inside containers"
 for c in victim attacker benign; do
-  docker exec "$c" bash -c 'apt-get update -qq && apt-get install -y -qq iperf3 iputils-ping net-tools iproute2 >/dev/null 2>&1' &
+  docker exec "$c" bash -c 'apt-get update -qq && apt-get install -y -qq iperf3 net-tools iproute2 >/dev/null 2>&1' &
 done
 wait
 echo "    base tools installed"

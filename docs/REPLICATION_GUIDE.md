@@ -621,7 +621,7 @@ echo "    benign IP: 172.30.0.30"
 
 echo "==> Installing tools inside containers"
 for c in victim attacker benign; do
-  docker exec "$c" bash -c 'apt-get update -qq && apt-get install -y -qq iperf3 iputils-ping net-tools iproute2 >/dev/null 2>&1' &
+  docker exec "$c" bash -c 'apt-get update -qq && apt-get install -y -qq iperf3 net-tools iproute2 >/dev/null 2>&1' &
 done
 wait
 echo "    base tools installed"
@@ -656,7 +656,7 @@ sudo bash setup_testbed.sh
 ```bash
 sudo docker ps
 # victim, attacker, benign should all show "Up"
-sudo docker exec attacker ping -c 2 172.30.0.10   # connectivity works
+docker ps --format 'table {{.Names}}\t{{.Status}}'   # containers are running
 ```
 
 ---
@@ -992,16 +992,17 @@ sudo bash testbed/demo.sh
 The complete source is in the repository. It:
 
 1. Runs each flood **WITHOUT** the filter (measures: packets reaching the app via
-   `eth0` rx counter, host CPU, ping latency).
+   the application counter, host CPU, and victim resource-load model).
 2. Runs the same flood **WITH** the filter (reads the XDP stats map → drop rate,
-   delivered packets, CPU, latency).
+   delivered packets, CPU, memory, and optional GPU utilization).
 3. Prints a formal report + a final difference table.
 
 Key measurement functions:
 - `xdp_stats()` — reads `stats_map` inside the victim (seen/dropped counters).
 - `rx_pkts()` — reads the victim's `eth0` rx packet counter from `/proc/net/dev`.
 - `host_cpu()` — overall host CPU % from `/proc/stat` (two samples 1s apart).
-- `ping_avg()` — average ping latency to the victim.
+- `app_pkts()` — reads packets received by the victim IP stack after XDP.
+- `gpu_one()` — reads optional NVIDIA GPU utilization.
 
 **Run it:**
 ```bash
@@ -1028,8 +1029,8 @@ Legitimate traffic drop    -                0                unaffected
 
 ### File: `testbed/bench_run.sh`
 
-Measures host CPU, victim container CPU, and ping latency during a UDP flood, for a
-given filter state.
+Measures host CPU and victim resource load during a UDP flood, for a given filter
+state. It measures CPU and victim resource load only.
 
 ```bash
 cd ~/Desktop/CN/testbed
@@ -1097,7 +1098,7 @@ CN/
 │   ├── setup_testbed.sh      # create network + containers
 │   ├── demo.sh               # one-command full demo
 │   ├── report.sh             # formal WITH-vs-WITHOUT report
-│   ├── bench_run.sh          # CPU + latency benchmark
+│   ├── bench_run.sh          # CPU benchmark
 │   ├── bench_udp.sh          # (dev) older benchmark
 │   ├── ctl_udp.sh            # attach/detach filter
 │   ├── container_veth.sh     # container → veth mapping

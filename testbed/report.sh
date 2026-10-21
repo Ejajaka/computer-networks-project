@@ -7,7 +7,8 @@ set -uo pipefail
 VICTIM_IP=172.30.0.10
 ATTACKER_IP=172.30.0.20
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-DURATION=8                     # seconds per flood scenario
+DURATION="${DURATION:-8}"     # seconds per CLI flood scenario (GUI uses 120)
+NORMAL_SECONDS=4               # same normal-traffic duration used by the GUI
 
 # helpers
 bpf_path() {
@@ -37,52 +38,84 @@ rx_pkts() {     # eth0 rx packet counter on victim (packets that reached the NIC
   docker exec victim bash -c 'cat /proc/net/dev | grep eth0' 2>/dev/null | awk '{print $3}'
 }
 
+app_pkts() {    # packets received by the victim IP stack after XDP
+  docker exec victim bash -c 'grep "^Ip:" /proc/net/snmp | tail -1' 2>/dev/null | awk '{print $4}'
+}
+
 host_cpu() {    # overall host CPU % over ~1s (two /proc/stat snapshots)
   l1=$(grep '^cpu ' /proc/stat); sleep 1; l2=$(grep '^cpu ' /proc/stat)
   echo "$l1 $l2" | awk '{id1=$5+$6;t1=$2+$3+$4+$5+$6+$7+$8;id2=$16+$17;t2=$13+$14+$15+$16+$17+$18+$19;printf "%.1f",100*(1-(id2-id1)/(t2-t1))}'
 }
 
-ping_avg() {    # ping the victim 5 times and average the round-trip time
-  ping -c 5 -W 1 "$VICTIM_IP" 2>/dev/null | grep -oP 'time=\K[0-9.]+' \
-    | awk '{s+=$1;a[NR]=$1}END{if(NR)printf "%.2f",s/NR;else printf "FAIL"}'
-}
-
-attack() {      # attack <udp|syn>  (launches flood for DURATION seconds)
+attack() {      # attack <udp|syn|both> (launches flood for DURATION seconds)
   local mode="$1"
-  for i in 1 2 3 4; do
-    if [ "$mode" = "udp" ]; then
-      docker exec -d attacker hping3 -2 -p 5201 --flood "$VICTIM_IP" >/dev/null 2>&1   # UDP flood
-    else
-      docker exec -d attacker hping3 -S -p 5201 --flood "$VICTIM_IP" >/dev/null 2>&1   # SYN flood
-    fi
+  local kinds="${mode}"
+  # The combined mode runs both packet types at the same time.
+  [ "$mode" = "both" ] && kinds="udp syn"
+  for kind in $kinds; do
+    # Each selected kind uses the same four-worker setup as the web simulator.
+    for i in 1 2 3 4; do
+      if [ "$kind" = "udp" ]; then
+        docker exec -d attacker hping3 -2 -p 5201 --flood "$VICTIM_IP" >/dev/null 2>&1
+      else
+        docker exec -d attacker hping3 -S -p 5201 --flood "$VICTIM_IP" >/dev/null 2>&1
+      fi
+    done
   done
   sleep "$DURATION"
   docker exec attacker pkill -9 hping3 >/dev/null 2>&1 || true
   sleep 1
 }
 
-run_with_cpu() {   # run_with_cpu <udp|syn>  -> "CPU_AVG rx_delta"
-  # run the attack and sample host CPU meanwhile
+gpu_one() {      # return NVIDIA GPU utilization, or NA when unavailable
+  nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits 2>/dev/null \
+    | awk '{sum += $1; count++} END {if (count) printf "%.1f", sum/count}'
+}
+
+run_with_cpu() {   # run_with_cpu <udp|syn> -> CPU APP_DELTA VCPU VMEM GPU
+  # Run the attack and sample host CPU/GPU meanwhile.
   local mode="$1"
-  local r1 r2 cpusum n
-  r1=$(rx_pkts); cpusum=0; n=0
+  local a1 a2 cpusum n gpu_sum gpu_n gpu_sample app_rate victim_cpu victim_mem
+  # Save the application counter before the attack starts.
+  a1=$(app_pkts); cpusum=0; n=0; gpu_sum=0; gpu_n=0
   ( attack "$mode" ) &
   local pid=$!
   while kill -0 $pid 2>/dev/null; do
     cpusum=$(awk -v a="$cpusum" -v b="$(host_cpu)" 'BEGIN{printf "%.1f",a+b}')
     n=$((n+1))
+    gpu_sample=$(gpu_one)
+    if [[ "$gpu_sample" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+      gpu_sum=$(awk -v a="$gpu_sum" -v b="$gpu_sample" 'BEGIN{printf "%.4f",a+b}')
+      gpu_n=$((gpu_n+1))
+    fi
   done
   wait $pid 2>/dev/null
-  r2=$(rx_pkts)
-  awk -v c="$cpusum" -v n="$n" -v d="$((r2-r1))" 'BEGIN{printf "%.1f %d",(n?c/n:0),d}'
+  # Read the application counter after the attack and calculate its rate.
+  a2=$(app_pkts)
+  app_rate=$(awk -v a="$a1" -v b="$a2" -v t="$DURATION" 'BEGIN{d=b-a; print (d>0 ? d/t : 0)}')
+  # Use the same victim CPU/memory model as sim/ui_server.py.
+  victim_cpu=$(awk -v r="$app_rate" 'BEGIN{v=2+r/5000; print (v>100?100:v)}')
+  victim_mem=$(awk -v r="$app_rate" 'BEGIN{v=32+r/5000; print (v>544?544:v)}')
+  if [ "$gpu_n" -gt 0 ]; then
+    gpu_sample=$(awk -v s="$gpu_sum" -v n="$gpu_n" 'BEGIN{printf "%.1f",s/n}')
+  else
+    gpu_sample="NA"
+  fi
+  awk -v c="$cpusum" -v n="$n" -v d="$((a2-a1))" -v v="$victim_cpu" -v m="$victim_mem" \
+    -v g="$gpu_sample" 'BEGIN{printf "%.1f %d %.1f %.1f %s",(n?c/n:0),d,v,m,g}'
 }
 
 fmt() { python3 -c "print(f'{int($1):,}')"; }   # add commas to big numbers (e.g. 1234567 -> 1,234,567)
+gpu_fmt() { [ "$1" = "NA" ] && printf "N/A" || printf "%s%%" "$1"; }
 
 # compare one scenario without/with filter
-scenario() {    # scenario <udp|syn>
+scenario() {    # scenario <udp|syn|both>
   local mode="$1" label
-  [ "$mode" = "udp" ] && label="UDP FLOOD" || label="SYN FLOOD"
+  case "$mode" in
+    udp) label="UDP FLOOD" ;;
+    syn) label="SYN FLOOD" ;;
+    both) label="COMBINED UDP + SYN FLOOD" ;;
+  esac
 
   echo ""
   echo "---------------------------------------------------------------------------------"
@@ -91,40 +124,54 @@ scenario() {    # scenario <udp|syn>
 
   # ----- Scenario A: WITHOUT filter -----
   detach_filter
-  read -r CPUNO NIC_NO < <(run_with_cpu "$mode")
-  LAT_NO=$(ping_avg)
+  read -r CPUNO APP_NO VCPU_NO VMEM_NO GPU_NO < <(run_with_cpu "$mode")
 
   # ----- Scenario B: WITH filter -----
   attach_filter
   read -r U0 UD0 S0 SD0 < <(xdp_stats)          # stats BEFORE
-  read -r CPUYES NIC_YES < <(run_with_cpu "$mode")
+  read -r CPUYES APP_YES VCPU_YES VMEM_YES GPU_YES < <(run_with_cpu "$mode")
   read -r U1 UD1 S1 SD1 < <(xdp_stats)          # stats AFTER
-  LAT_YES=$(ping_avg)
 
   if [ "$mode" = "udp" ]; then
     TOT=$((U1-U0)); DROP=$((UD1-UD0))
-  else
+  elif [ "$mode" = "syn" ]; then
     TOT=$((S1-S0)); DROP=$((SD1-SD0))
+  else
+    TOT=$((U1-U0+S1-S0)); DROP=$((UD1-UD0+SD1-SD0))
   fi
   RATE=$(awk -v t="$TOT" -v d="$DROP" 'BEGIN{if(t)printf "%.1f",100*d/t;else print "0.0"}')
   DELIVERED_YES=$((TOT-DROP))   # packets that survived the filter = reached the app
 
   # store for the final summary
   if [ "$mode" = "udp" ]; then
-    UDP_RATE=$RATE; UDP_APP_NO=$NIC_NO; UDP_APP_YES=$DELIVERED_YES
+    UDP_RATE=$RATE; UDP_APP_NO=$APP_NO; UDP_APP_YES=$DELIVERED_YES
     UDP_CPU_NO=$CPUNO; UDP_CPU_YES=$CPUYES
-  else
-    SYN_RATE=$RATE; SYN_APP_NO=$NIC_NO; SYN_APP_YES=$DELIVERED_YES
+    UDP_VCPU_NO=$VCPU_NO; UDP_VCPU_YES=$VCPU_YES
+    UDP_VMEM_NO=$VMEM_NO; UDP_VMEM_YES=$VMEM_YES
+    UDP_GPU_NO=$GPU_NO; UDP_GPU_YES=$GPU_YES
+  elif [ "$mode" = "syn" ]; then
+    SYN_RATE=$RATE; SYN_APP_NO=$APP_NO; SYN_APP_YES=$DELIVERED_YES
     SYN_CPU_NO=$CPUNO; SYN_CPU_YES=$CPUYES
+    SYN_VCPU_NO=$VCPU_NO; SYN_VCPU_YES=$VCPU_YES
+    SYN_VMEM_NO=$VMEM_NO; SYN_VMEM_YES=$VMEM_YES
+    SYN_GPU_NO=$GPU_NO; SYN_GPU_YES=$GPU_YES
+  else
+    BOTH_RATE=$RATE; BOTH_APP_NO=$APP_NO; BOTH_APP_YES=$DELIVERED_YES
+    BOTH_CPU_NO=$CPUNO; BOTH_CPU_YES=$CPUYES
+    BOTH_VCPU_NO=$VCPU_NO; BOTH_VCPU_YES=$VCPU_YES
+    BOTH_VMEM_NO=$VMEM_NO; BOTH_VMEM_YES=$VMEM_YES
+    BOTH_GPU_NO=$GPU_NO; BOTH_GPU_YES=$GPU_YES
   fi
 
   echo ""
   printf "  %-28s %-22s %-22s\n" "" "WITHOUT filter" "WITH filter"
   printf "  %-28s %-22s %-22s\n" "" "---------------" "-----------"
-  printf "  %-28s %-22s %-22s\n" "  Packets reaching app" "$(fmt $NIC_NO)" "$(fmt $DELIVERED_YES)"
+  printf "  %-28s %-22s %-22s\n" "  Packets reaching app" "$(fmt $APP_NO)" "$(fmt $DELIVERED_YES)"
   printf "  %-28s %-22s %-22s\n" "  Packets dropped by XDP" "0" "$(fmt $DROP)  ($RATE%)"
   printf "  %-28s %-22s %-22s\n" "  Host CPU during flood" "$CPUNO%" "$CPUYES%"
-  printf "  %-28s %-22s %-22s\n" "  Ping latency (avg)" "$LAT_NO ms" "$LAT_YES ms"
+  printf "  %-28s %-22s %-22s\n" "  Victim CPU load (model)" "$VCPU_NO%" "$VCPU_YES%"
+  printf "  %-28s %-22s %-22s\n" "  Victim memory (model)" "$VMEM_NO MB" "$VMEM_YES MB"
+  printf "  %-28s %-22s %-22s\n" "  GPU utilization" "$(gpu_fmt "$GPU_NO")" "$(gpu_fmt "$GPU_YES")"
   echo ""
   printf "  CONCLUSION : the filter dropped %s%% of the %s packets at the network\n" "$RATE" "$label"
   echo "               interface (XDP), so only $(fmt $DELIVERED_YES) reached the victim."
@@ -155,6 +202,7 @@ echo "   >> Ready."
 
 scenario udp
 scenario syn
+scenario both                  # run UDP and SYN together
 
 # ----- legitimate traffic test -----
 # normal user sends 3 Mbps for 5 s with the filter ON - extra drops should be 0
@@ -163,7 +211,7 @@ echo "--------------------------------------------------------------------------
 printf "  %-28s %s\n" "" "LEGITIMATE TRAFFIC (filter ON, normal user)"
 echo "---------------------------------------------------------------------------------"
 read -r U0 UD0 S0 SD0 < <(xdp_stats)
-docker exec benign iperf3 -c "$VICTIM_IP" -p 5201 -u -b 3M -t 5 >/dev/null 2>&1
+docker exec benign iperf3 -c "$VICTIM_IP" -p 5201 -u -b 3M -t "$NORMAL_SECONDS" >/dev/null 2>&1
 read -r U1 UD1 S1 SD1 < <(xdp_stats)
 EXTRA=$((UD1-UD0))
 echo ""
@@ -192,10 +240,22 @@ echo "   -----------------------------------------------------------------------
 printf "   %-26s %-16s %-16s %-12s\n" "UDP drop rate" "0.0%" "${UDP_RATE}%" "+${UDP_RATE} pp"
 printf "   %-26s %-16s %-16s %-12s\n" "UDP packets to app" "$(fmt $UDP_APP_NO)" "$(fmt $UDP_APP_YES)" "$(red_no $UDP_APP_NO $UDP_APP_YES) less"
 printf "   %-26s %-16s %-16s %-12s\n" "UDP host CPU" "${UDP_CPU_NO}%" "${UDP_CPU_YES}%" "-"
+printf "   %-26s %-16s %-16s %-12s\n" "UDP victim CPU model" "${UDP_VCPU_NO}%" "${UDP_VCPU_YES}%" "-"
+printf "   %-26s %-16s %-16s %-12s\n" "UDP victim memory model" "${UDP_VMEM_NO} MB" "${UDP_VMEM_YES} MB" "-"
+printf "   %-26s %-16s %-16s %-12s\n" "UDP GPU utilization" "$(gpu_fmt "$UDP_GPU_NO")" "$(gpu_fmt "$UDP_GPU_YES")" "-"
 echo "   -------------------------------------------------------------------------"
 printf "   %-26s %-16s %-16s %-12s\n" "SYN drop rate" "0.0%" "${SYN_RATE}%" "+${SYN_RATE} pp"
 printf "   %-26s %-16s %-16s %-12s\n" "SYN packets to app" "$(fmt $SYN_APP_NO)" "$(fmt $SYN_APP_YES)" "$(red_no $SYN_APP_NO $SYN_APP_YES) less"
 printf "   %-26s %-16s %-16s %-12s\n" "SYN host CPU" "${SYN_CPU_NO}%" "${SYN_CPU_YES}%" "-"
+printf "   %-26s %-16s %-16s %-12s\n" "SYN victim CPU model" "${SYN_VCPU_NO}%" "${SYN_VCPU_YES}%" "-"
+printf "   %-26s %-16s %-16s %-12s\n" "SYN victim memory model" "${SYN_VMEM_NO} MB" "${SYN_VMEM_YES} MB" "-"
+printf "   %-26s %-16s %-16s %-12s\n" "SYN GPU utilization" "$(gpu_fmt "$SYN_GPU_NO")" "$(gpu_fmt "$SYN_GPU_YES")" "-"
+echo "   -------------------------------------------------------------------------"
+printf "   %-26s %-16s %-16s %-12s\n" "Combined drop rate" "0.0%" "${BOTH_RATE}%" "+${BOTH_RATE} pp"
+printf "   %-26s %-16s %-16s %-12s\n" "Combined packets to app" "$(fmt $BOTH_APP_NO)" "$(fmt $BOTH_APP_YES)" "$(red_no $BOTH_APP_NO $BOTH_APP_YES) less"
+printf "   %-26s %-16s %-16s %-12s\n" "Combined victim CPU model" "${BOTH_VCPU_NO}%" "${BOTH_VCPU_YES}%" "-"
+printf "   %-26s %-16s %-16s %-12s\n" "Combined victim memory model" "${BOTH_VMEM_NO} MB" "${BOTH_VMEM_YES} MB" "-"
+printf "   %-26s %-16s %-16s %-12s\n" "Combined GPU utilization" "$(gpu_fmt "$BOTH_GPU_NO")" "$(gpu_fmt "$BOTH_GPU_YES")" "-"
 echo "   -------------------------------------------------------------------------"
 printf "   %-26s %-16s %-16s %-12s\n" "Legitimate traffic drop" "-" "0" "unaffected"
 echo "   -------------------------------------------------------------------------"

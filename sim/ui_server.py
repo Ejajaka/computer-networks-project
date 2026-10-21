@@ -43,7 +43,7 @@ lock = threading.Lock()
 flood_lock = threading.Lock()
 state = {
     "flood_running": False,
-    "flood_mode": None,       # "udp" or "syn" while a flood is running
+    "flood_mode": None,       # "udp", "syn", or "both" while a flood runs
     "flood_gen": 0,           # invalidates stale flood threads
     "flood_remaining": 0,
     "filter_on": False,
@@ -56,6 +56,12 @@ state = {
     "normal_loss": None,
     "history": [],           # list of {t, nic, app}
     "model": None,           # backend rate-limiter model (real XDP counters)
+    "resources": {
+        "cpu_pct": 2.0,
+        "memory": {"used_pct": 6.2, "used_mb": 32.0, "total_mb": 512.0},
+        "gpu": {"available": False},
+        "source": "victim-load-model",
+    },
 }
 
 
@@ -107,6 +113,50 @@ def read_xdp_stats():
     for name, value in re.findall(r'"(' + "|".join(fields) + r')":\s*(\d+)', out):
         vals[name] = vals.get(name, 0) + int(value)
     return vals or None
+
+
+def estimate_victim_resources(app_pps):
+    """Estimate victim pressure from traffic that reaches the application.
+
+    This makes the simulator show the resource cost that XDP is preventing.
+    It is deliberately labelled as a model, because host-kernel packet work is
+    not fully charged to the victim container by Docker.
+    """
+    app_pps = max(app_pps or 0, 0)
+    cpu_pct = round(min(100.0, 2.0 + app_pps / 5000.0), 1)
+    used_mb = round(32.0 + min(512.0, app_pps / 5000.0), 1)
+    total_mb = 512.0
+    return {
+        "cpu_pct": cpu_pct,
+        "memory": {
+            "used_pct": round(100.0 * used_mb / total_mb, 1),
+            "used_mb": used_mb,
+            "total_mb": total_mb,
+        },
+        "source": "victim-load-model",
+    }
+
+
+def read_gpu():
+    """Read NVIDIA GPU usage when nvidia-smi is available; otherwise report N/A."""
+    out = sh("nvidia-smi --query-gpu=utilization.gpu,memory.used,memory.total "
+             "--format=csv,noheader,nounits").strip()
+    rows = []
+    try:
+        for line in out.splitlines():
+            values = [float(value.strip()) for value in line.split(",")]
+            if len(values) == 3:
+                rows.append(values)
+    except ValueError:
+        rows = []
+    if not rows:
+        return {"available": False}
+    return {
+        "available": True,
+        "util_pct": round(sum(row[0] for row in rows) / len(rows), 1),
+        "memory_used_mb": round(sum(row[1] for row in rows), 1),
+        "memory_total_mb": round(sum(row[2] for row in rows), 1),
+    }
 
 
 UDP_THRESHOLD = 800
@@ -262,6 +312,9 @@ def poll_loop():
 
         # Check whether packets are currently passing through XDP.
         on = filter_is_on()
+        # Read resource usage for the live resource cards.
+        resources = estimate_victim_resources(app_pps)
+        resources["gpu"] = read_gpu()
         # The Python model reads real kernel counters and prepares the dashboard
         # verdict. The C/XDP program has already made the actual packet decision.
         model = build_model(xdp, prev_xdp, dt, on)
@@ -281,6 +334,7 @@ def poll_loop():
             state["app_pps"] = app_pps
             state["drop_pct"] = drop
             state["model"] = model
+            state["resources"] = resources
             state["history"].append({"t": time.strftime("%H:%M:%S"),
                                      "nic": nic_pps, "app": app_pps})
             if len(state["history"]) > HISTORY:
@@ -291,7 +345,7 @@ def poll_loop():
 # This worker keeps the selected UDP/SYN/both attack alive for two minutes and
 # replaces workers if one exits early.
 def flood_loop(mode, gen):
-    """Keeps one kind of flood (udp or syn) running for FLOOD_SECONDS."""
+    """Keeps the selected UDP/SYN/both flood running for FLOOD_SECONDS."""
     def still_current():
         with lock:
             return (state["flood_gen"] == gen and state["flood_running"]
@@ -404,7 +458,6 @@ PAGE = r"""<!DOCTYPE html>
  .pill.on{background:#064e3b;color:#6ee7b7}.pill.off{background:#4c1d24;color:#fca5a5}
 </style></head><body>
 <h1>eBPF/XDP DDoS Mitigation — Live Simulator</h1>
-<div class="sub">Attacker floods the victim for 2 minutes. Toggle the filter ON/OFF and watch the effect live.</div>
 
 <div class="row">
   <div class="card"><div class="label">Packets hitting NIC</div><div class="value nic" id="nic">--</div><div class="label">per second (before XDP)</div></div>
@@ -424,14 +477,20 @@ PAGE = r"""<!DOCTYPE html>
 <div class="status">Flood: <span id="floodState">idle</span> &nbsp;|&nbsp; Countdown: <span id="cd">--</span>s &nbsp;|&nbsp; Filter: <span id="fpill" class="pill off">OFF</span></div>
 
 <h2 style="font-size:15px;margin:22px 0 0">Backend rate-limiter model — real XDP counters</h2>
-<div class="sub" style="margin:4px 0 10px">The Python backend reads <span class="inline-code">stats_map</span> from the kernel and decides PASS/DROP. The browser only displays it.</div>
 <div class="row">
   <div class="card"><div class="label">UDP rate seen by XDP</div><div class="value nic" id="udpRate">--</div><div class="label" id="udpMeta">limit 800 pkt/s</div></div>
   <div class="card"><div class="label">UDP verdict (backend)</div><div class="value" id="udpState">--</div><div class="label">PASS = forward, DROP = discard</div></div>
   <div class="card"><div class="label">SYN rate seen by XDP</div><div class="value nic" id="synRate">--</div><div class="label" id="synMeta">limit 200 /s</div></div>
   <div class="card"><div class="label">SYN verdict (backend)</div><div class="value" id="synState">--</div><div class="label">PASS = forward, DROP = discard</div></div>
 </div>
-<div class="status">Model source: <span id="modelSrc">backend (Docker + XDP)</span> &nbsp;|&nbsp; Window: <span id="modelWin">--</span>s</div>
+<div class="status">Window: <span id="modelWin">--</span>s</div>
+
+<h2 style="font-size:15px;margin:22px 0 0">Resource utilization</h2>
+<div class="row">
+  <div class="card"><div class="label">CPU</div><div class="value nic" id="cpuUse">--</div><div class="label">victim load model</div></div>
+  <div class="card"><div class="label">Memory</div><div class="value nic" id="memoryUse">--</div><div class="label" id="memoryMeta">victim load model</div></div>
+  <div class="card"><div class="label">GPU</div><div class="value nic" id="gpuUse">N/A</div><div class="label" id="gpuMeta">nvidia-smi unavailable</div></div>
+</div>
 
 <h2 style="font-size:15px;margin:22px 0 0">Live traffic (packets/sec)</h2>
 <canvas id="chart" height="170"></canvas>
@@ -508,8 +567,15 @@ async function refresh(){
   }
   mset('udpRate','udpState','udpMeta',m&&m.udp,'limit 800 pkt/s');
   mset('synRate','synState','synMeta',m&&m.syn,'limit 200 /s');
-  document.getElementById('modelSrc').textContent=m?(m.attached?'backend · real XDP counters':'backend · filter OFF'):'backend · no data';
   document.getElementById('modelWin').textContent=m&&m.window_s?m.window_s:'--';
+  // Resource cards are also backend values; GPU is N/A when no NVIDIA GPU exists.
+  const r=s.resources||{}, mem=r.memory||{}, gpu=r.gpu||{};
+  const pct=v=>(v===null||v===undefined)?'--':v+'%';
+  document.getElementById('cpuUse').textContent=pct(r.cpu_pct);
+  document.getElementById('memoryUse').textContent=pct(mem.used_pct);
+  document.getElementById('memoryMeta').textContent=mem.used_mb===null||mem.used_mb===undefined?'victim load model':'model: '+nf(mem.used_mb)+' / '+nf(mem.total_mb)+' MB';
+  document.getElementById('gpuUse').textContent=gpu.available?pct(gpu.util_pct):'N/A';
+  document.getElementById('gpuMeta').textContent=gpu.available?'GPU utilization':'nvidia-smi unavailable';
   hist=s.history||[];draw();
  }catch(e){}
 }
