@@ -41,20 +41,8 @@ Measurements were taken in the local Docker testbed with `hping3` floods and
 
 ## Architecture
 
-```mermaid
-flowchart LR
-    A[Attacker<br/>172.30.0.20] -->|UDP or SYN flood| B[Victim NIC]
-    B --> C{XDP filter<br/>engine/ddos_filter_kern.o}
-    C -->|below threshold| D[XDP_PASS]
-    C -->|above threshold| E[XDP_DROP]
-    C --> F[stats_map counters]
-    F --> G[Python backend<br/>sim/ui_server.py]
-    G --> H[Browser dashboard]
-    C --> I[bpf_printk alert]
-    I --> J[Controller<br/>controller/controller.py]
-    J --> K[iptables block<br/>results/alerts.log]
-    D --> L[Linux network stack<br/>+ iperf3 service]
-```
+The end-to-end architecture, packet path, observability paths, and component
+responsibilities are documented in [`flowchart.txt`](flowchart.txt).
 
 ### Packet path
 
@@ -102,7 +90,7 @@ results/
 docs/
   references/             paper PDF and extracted paper text
 
-flowchart.txt             end-to-end simulator flowchart
+flowchart.txt             architecture, packet path, and control paths
 COMMANDS.txt              web and CLI command reference
 ```
 

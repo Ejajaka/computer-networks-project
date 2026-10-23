@@ -1,151 +1,95 @@
-                    START
-                      |
-                      v
-        bash sim/start_ui.sh
-                      |
-                      v
-        +---------------------------+
-        | sim/start_ui.sh           |
-        |                           |
-        | 1. Stop old UI            |
-        | 2. Start ui_server.py     |
-        | 3. Check port 8090        |
-        | 4. Show browser URL       |
-        +---------------------------+
-                      |
-                      v
-        http://localhost:8090
-                      |
-                      v
-        +---------------------------+
-        | Browser page inside       |
-        | ui_server.py              |
-        +---------------------------+
-                      |
-       +--------------+--------------+
-       |              |              |
-       v              v              v
- Start UDP       Start SYN       Start Both
- Flood           Flood           Flood
-       |              |              |
-       +--------------+--------------+
-                      |
-                      v
-        +---------------------------+
-        | Python HTTP backend       |
-        | ui_server.py              |
-        +---------------------------+
-                      |
-                      v
-        Starts/stops attack workers
-        Turns XDP filter ON/OFF
-                      |
-                      v
-        Packets reach network card
-                      |
-                      v
-        +---------------------------+
-        | XDP filter                |
-        | ddos_filter_kern.o        |
-        | created from              |
-        | engine/ddos_filter_kern.c|
-        +---------------------------+
-                      |
-                      v
-              Check packet type
-                      |
-          +-----------+-----------+
-          |                       |
-          v                       v
-        UDP                   TCP SYN
-          |                       |
-          v                       v
-   Count source IP        Count source IP
-   packets for 1 sec      SYNs for 1 sec
-          |                       |
-          v                       v
-     Limit: 800/s          Limit: 200/s
-          |                       |
-     +----+----+             +----+----+
-     |         |             |         |
-     v         v             v         v
-  Under     Over          Under     Over
-  limit     limit         limit     limit
-     |         |             |         |
-     v         v             v         v
-  PASS      DROP          PASS      DROP
-     |         |             |         |
-     +----+----+-------------+----+----+
-          |
-          v
-   Update stats_map counters
-          |
-          v
-        poll_loop()
-   runs every 1 second
-          |
-          +--> Read NIC packets
-          |
-          +--> Read application packets
-          |
-          +--> Read stats_map
-          |
-          +--> Check filter status
-          |
-          +--> Estimate victim CPU/memory from app packets
-          |
-          +--> Read optional GPU
-          |
-          v
-      build_model()
-          |
-          +--> Calculate UDP rate
-          |
-          +--> Calculate SYN rate
-          |
-          +--> Calculate drop percentage
-          |
-          +--> Decide PASS or DROP
-          |
-          v
-       Save result in state
-          |
-          v
-       Save resources in state
-          |
-          v
- Browser calls /api/state
- every 1 second
-          |
-          v
- Browser updates:
- - NIC packets
- - App packets
- - Drop percentage
- - UDP verdict
- - SYN verdict
- - CPU usage
- - Memory usage
- - GPU usage or N/A
- - Live graph
+eBPF/XDP DDoS Mitigation - Architecture
+=======================================
 
+Testbed topology
+----------------
 
-start_ui.sh
-     |
-     v
-starts
-     |
-     v
-ui_server.py
-     |
-     +--> controls attacks
-     +--> controls XDP
-     +--> reads counters
-     +--> calculates result
-     +--> serves browser page
+                         Docker network: ddos-net (172.30.0.0/24)
 
+  +----------------------+       UDP / SYN flood       +----------------------+
+  | Attacker             |---------------------------->| Victim               |
+  | 172.30.0.20          |                             | 172.30.0.10          |
+  +----------------------+                             | eth0                 |
+                                                       +----------+-----------+
+                                                                  |
+  +----------------------+       legitimate traffic              |
+  | Benign client        |---------------------------->          |
+  | 172.30.0.30          |                                       |
+  +----------------------+                                       |
+                                                                  v
 
-Important:
-XDP/C program = actually drops packets
-Python backend = controls and reads results
-Browser = only shows the results
+Packet path
+-----------
+
+                                              +-----------------------------+
+                                              | XDP filter                  |
+                                              | engine/ddos_filter_kern.o   |
+                                              |                             |
+                                              | parse Ethernet + IPv4       |
+                                              | UDP branch / TCP SYN branch |
+                                              | per-source-IP 1 s window    |
+                                              | UDP limit: 800 packets/s    |
+                                              | SYN limit: 200 SYNs/s       |
+                                              +------+---------------+------+
+                                                     |               |
+                                           below limit               above limit
+                                                     |               |
+                                                     v               v
+                                             +-------------+   +-------------+
+                                             | XDP_PASS    |   | XDP_DROP    |
+                                             +------+------+   +------+------+
+                                                    |                 |
+                                                    v                 v
+                                          +-------------------+   discarded at
+                                          | Linux network     |   the network card
+                                          | stack + iperf3    |
+                                          +-------------------+
+
+Observability and response paths
+--------------------------------
+
+  XDP filter
+      |
+      +--> stats_map (udp_total, udp_dropped, syn_total, syn_dropped)
+      |        |
+      |        v
+      |    sim/ui_server.py
+      |        |
+      |        v
+      |    Browser dashboard
+      |
+      +--> bpf_printk alert
+               |
+               v
+           trace_pipe
+               |
+               v
+           controller/controller.py
+               |
+               +--> iptables DROP rule in victim
+               |
+               +--> results/alerts.log
+
+Control path
+------------
+
+  Browser buttons
+      |
+      v
+  sim/ui_server.py
+      |
+      +--> start/stop hping3 flood workers in attacker
+      |
+      +--> load/pin/attach/detach XDP on victim eth0
+
+Component responsibilities
+--------------------------
+
+  engine/ddos_filter_kern.c   real packet inspection and DROP/PASS decision
+  engine/Makefile             compiles C sources to eBPF objects
+  sim/ui_server.py            attack control, counter reading, dashboard backend
+  site/                       hosted browser model of the same rate limiter
+  testbed/setup_testbed.sh    creates the three-container testbed
+  testbed/demo.sh             CLI UDP + SYN + combined demonstration
+  testbed/report.sh           formal with/without-filter comparison
+  controller/controller.py    reads alerts and applies iptables blocks
