@@ -132,32 +132,6 @@
       </div>
     </section>
 
-    <section class="section info-grid">
-      <article class="info-card">
-        <h3>What the filter does</h3>
-        <p>
-          The XDP program parses IPv4 UDP and TCP SYN packets, keeps a one-second counter
-          for each source IP, and returns <code>XDP_DROP</code> above the configured limit.
-          Everything else passes to the normal Linux network stack.
-        </p>
-      </article>
-      <article class="info-card">
-        <h3>What this page models</h3>
-        <p>
-          Attack rate, XDP pass/drop behavior, the dashboard verdicts, and the victim
-          resource-load estimates. It does not execute eBPF or generate real packets.
-        </p>
-      </article>
-      <article class="info-card">
-        <h3>Run the real testbed</h3>
-        <p>
-          Build the filters with <code>make -C engine</code>, then run
-          <code>bash sim/start_ui.sh</code> for the local dashboard or
-          <code>sudo bash testbed/demo.sh</code> for the CLI report.
-        </p>
-      </article>
-    </section>
-
     <footer class="footer">
       <span>eBPF/XDP DDoS mitigation project</span>
       <a href="https://github.com/Ejajaka/computer-networks-project">Repository</a>
