@@ -73,22 +73,10 @@ Measurements were taken in the local Docker testbed with `hping3` floods and
           +----------+---------+ +--------+---------+
                      |                    |
                      v                    v
-        +------------------------+                      packet discarded
-        | Linux stack + iperf3   |                      at the network card
+        +------------------------+     packet discarded
+        | Linux stack + iperf3   |    at the network card
         +------------------------+
 
-
-Observability and control
--------------------------
-
-  XDP filter -- stats_map ------> sim/ui_server.py -- /api/state --> Browser dashboard
-  XDP filter -- bpf_printk -----> trace_pipe ------> controller/controller.py
-                                                         |
-                                                         +--> iptables DROP in victim
-                                                         +--> results/alerts.log
-
-  Browser buttons --> sim/ui_server.py --> hping3 workers / XDP attach or detach
-```
 
 ## Repository layout
 
