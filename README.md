@@ -249,16 +249,6 @@ The repository has been checked with:
 - No leftover flood workers after stopping.
 - XDP detached after test completion.
 
-## Limitations
-
-- Thresholds are fixed; legitimate senders above the limit can be blocked.
-- IPv4 UDP and TCP SYN only; IPv6 and other protocols pass through.
-- No protection against source-IP spoofing.
-- Rate-based detection does not catch low-and-slow application-layer attacks.
-- CPU and memory resource cards are model estimates, not cgroup measurements.
-- The Docker testbed is an emulation, not a hardware IoT deployment.
-- GitHub Pages hosts a browser model only; the real eBPF/XDP path requires a
-  local Linux kernel and Docker.
 
 ## References
 
