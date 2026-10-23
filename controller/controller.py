@@ -2,8 +2,8 @@
 """Reads filter alerts, blocks the source IP with iptables, and logs it."""
 import os
 import re
-import subprocess
-import sys
+import subprocess  # allows to write terminal commands from inside python and get their output
+import sys   # for command line arguments
 import time
 from datetime import datetime
 

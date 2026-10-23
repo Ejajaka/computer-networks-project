@@ -1,14 +1,4 @@
 #!/usr/bin/env bash
-# Start the live DDoS mitigation simulator.
-#
-# Simple flow:
-#   1. Stop an older ui_server.py process.
-#   2. Start sim/ui_server.py in the background.
-#   3. Wait until the Python web server answers /api/state.
-#   4. Tell the user to open http://localhost:8090.
-#
-# The actual simulation logic is in ui_server.py; this file only starts it.
-# Usage: bash sim/start_ui.sh
 set -euo pipefail  #makes the script stop of there is some command that fails or some variable missing
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOG="/tmp/sim_ui.log"  # for logging

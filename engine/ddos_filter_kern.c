@@ -4,9 +4,9 @@
 #include <linux/ip.h>
 #include <linux/udp.h>
 #include <linux/tcp.h>
-#include <linux/in.h>
+#include <linux/in.h>  // internet protocol and addresses
 #include <bpf/bpf_helpers.h>
-#include <bpf/bpf_endian.h>
+#include <bpf/bpf_endian.h> //network is big and lappie is little
 
 #define RATE_THRESHOLD 800
 #define RATE_WINDOW_NS 1000000000ULL   // 1 second (UDP)

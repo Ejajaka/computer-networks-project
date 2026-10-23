@@ -1,149 +1,262 @@
-# eBPF/XDP Real-Time DDoS Detection & Mitigation
+# eBPF/XDP Real-Time DDoS Detection and Mitigation
 
-This project is a **copy and improvement** of the paper
-**"eBPF-Based Real-Time DDoS Mitigation for IoT Edge Devices"**
-(A. Tolay, Istinye University, July 2025) — arXiv:2508.00851.
+[![Live Demo](https://img.shields.io/badge/Live%20Demo-GitHub%20Pages-2ea44f?logo=githubpages&logoColor=white)](https://ejajaka.github.io/computer-networks-project/)
+[![eBPF](https://img.shields.io/badge/eBPF-XDP-0ea5e9)](https://ebpf.io/)
+[![Paper](https://img.shields.io/badge/Paper-arXiv%3A2508.00851-b31b1b)](https://arxiv.org/abs/2508.00851)
 
-- **Reproduced:** the paper's Docker-based **UDP flood** protection (spot a sender that
-  is sending too fast, and throw its packets away at the network card).
-- **Extended:** added **SYN flood** protection (spot a sender that is trying to start too
-  many new connections at once), and combined **both** into one program.
+An eBPF/XDP testbed for detecting and dropping UDP and TCP SYN floods at the
+network driver, before packets reach the normal Linux networking stack. The
+project reproduces the UDP mitigation approach from Tolay (2025) and extends it
+with SYN flood protection, a combined filter, a Python controller, and a live
+web dashboard.
 
-> **▶ How to run it yourself:** see **[docs/HOW_TO_RUN.md](docs/HOW_TO_RUN.md)** — a step-by-step
-> guide with the commands, what to expect, how it was built, and simple explanations.
->
-> **▶ Recreate everything from scratch:** see **[docs/REPLICATION_GUIDE.md](docs/REPLICATION_GUIDE.md)**
-> — a complete manual with every command and every file's full source code.
+## Live demo
 
-> **🌐 Complete project explanation (website):** open
-> **[`docs/website/index.html`](docs/website/index.html)** in any browser (or visit the repo's
-> **GitHub Pages**). It explains the paper, our added SYN-flood + combined features,
-> every line of code, the testbed, the results, and how to run it — in simple words
-> with diagrams and an interactive demo.
+**https://ejajaka.github.io/computer-networks-project/**
 
----
+The hosted page is an interactive browser model of the rate limiter and
+dashboard. It does **not** execute eBPF or generate packets. The real
+kernel/XDP implementation runs locally with the testbed commands below.
 
-## 1. What the results were
+## Highlights
 
-| Test | Paper | Our result |
-|---|---|---|
-| UDP flood dropped | ~99% | **99.7%** |
-| SYN flood dropped | (not covered) | **99.9%** |
-| Combined UDP + SYN dropped | — | **99.8%** |
-| Normal traffic preserved | Yes | Yes (0% dropped below the limit) |
-| Time from detection to blocking | < 2 s | < 2 s |
+| Capability | Implementation |
+|---|---|
+| UDP flood protection | Per-source-IP packet rate, limit 800 packets/s |
+| SYN flood protection | Per-source-IP SYN rate, limit 200 attempts/s |
+| Combined defense | One XDP program handles both protocols |
+| Early dropping | Native XDP before `sk_buff` allocation |
+| Kernel-to-user alerts | `bpf_printk` to `trace_pipe` |
+| Persistent blocking | Controller adds an `iptables` DROP rule |
+| Live dashboard | Python backend, browser UI, packet-rate chart, resource model |
+| CLI validation | Combined UDP + SYN tests and with/without-filter reports |
 
----
+## Measured results
 
-## 2. How it is put together
+| Test | Result |
+|---|---|
+| UDP flood dropped | 99.6-99.8% |
+| SYN flood dropped | 99.8-99.9% |
+| Combined UDP + SYN dropped | ~99.7% |
+| Legitimate UDP traffic | 0% dropped |
+| Detection-to-block response | Under 2 seconds |
 
+Measurements were taken in the local Docker testbed with `hping3` floods and
+`iperf3` legitimate traffic.
+
+## Architecture
+
+```mermaid
+flowchart LR
+    A[Attacker<br/>172.30.0.20] -->|UDP or SYN flood| B[Victim NIC]
+    B --> C{XDP filter<br/>engine/ddos_filter_kern.o}
+    C -->|below threshold| D[XDP_PASS]
+    C -->|above threshold| E[XDP_DROP]
+    C --> F[stats_map counters]
+    F --> G[Python backend<br/>sim/ui_server.py]
+    G --> H[Browser dashboard]
+    C --> I[bpf_printk alert]
+    I --> J[Controller<br/>controller/controller.py]
+    J --> K[iptables block<br/>results/alerts.log]
+    D --> L[Linux network stack<br/>+ iperf3 service]
 ```
- attacker  --UDP/SYN flood-->  victim
-  (172.30.0.20)                  |
-                                 v
-                         victim's network card
-                                 |  (XDP: the very first stop)
-                                 v
-                     ddos_filter_kern.o
-                     - UDP: drop a sender above 800 packets/s
-                     - SYN: drop a sender above 200 new-connections/s
-                                 |  leaves a note (bpf_printk)
-                                 v
-                   trace_pipe  -->  controller.py (helper program)
-                                 |  firewall rule: block the attacker's IP
-                                 v
-                        alerts.log  (a record of events)
-```
 
-- **In the kernel (the filter):** bad packets are thrown away at the very first stop on
-  the network card, before the computer spends memory and time on them. This is the fast
-  part.
-- **Outside the kernel (the controller):** a normal helper program reads the notes the
-  filter leaves, blocks the attacker's IP with a firewall rule, and keeps a log. This is
-  the flexible part.
+### Packet path
 
----
+1. Incoming Ethernet frame reaches the victim's `eth0`.
+2. The XDP program parses the IPv4 header and reads the source IP.
+3. UDP and TCP SYN packets are counted in per-source-IP maps.
+4. A one-second window is tracked for each sender.
+5. Packets above the configured rate return `XDP_DROP`; everything else returns `XDP_PASS`.
+6. The program updates `stats_map` counters for observability.
+7. The Python backend reads those counters and renders the dashboard.
 
-## 3. The files
+## Repository layout
 
-```
+```text
 engine/
-  hello_xdp.c          # quick test program (proves XDP works)
-  udp_filter_kern.c    # UDP flood filter (reproduces the paper)
-  syn_filter_kern.c    # SYN flood filter (our extension)
-  ddos_filter_kern.c   # COMBINED UDP + SYN filter (our main program)
-  Makefile             # build script (clang -> eBPF)
-controller/
-  controller.py        # reads notes, blocks attacker IP, logs events
+  ddos_filter_kern.c      combined UDP + SYN XDP filter
+  udp_filter_kern.c       UDP-only filter (paper reproduction)
+  syn_filter_kern.c       SYN-only filter
+  Makefile                compiles C sources to eBPF objects
+
+sim/
+  start_ui.sh             starts the local web simulator
+  ui_server.py            backend, HTTP API, dashboard, resource model
+
+site/
+  index.html              hosted GitHub Pages demo
+  style.css
+  app.js                  browser-side model of the rate limiter
+
 testbed/
-  setup_testbed.sh     # creates the fake network + victim/attacker/benign
-  ctl_udp.sh           # turn the filter on/off inside the victim
-  bench_run.sh         # measures CPU during a UDP flood
-  start_controller.sh  # starts the controller program
+  setup_testbed.sh        creates the Docker victim/attacker/benign network
+  demo.sh                 one-command UDP + SYN + combined CLI demo
+  report.sh               formal with/without-filter report
+  bench_run.sh            CPU benchmark
+  ctl_udp.sh              attach/detach the UDP filter
+  start_controller.sh     starts the alert controller
+
+controller/
+  controller.py           reads kernel alerts, blocks the attacker IP, logs events
+
 results/
-  UDP_results.md       # the measured results in detail
-  alerts.log           # event log from the runs
+  UDP_results.md          recorded measurements
+  alerts.log              controller event log
+
 docs/
-  HOW_TO_RUN.md        # step-by-step run/verify guide
-  REPLICATION_GUIDE.md # full rebuild manual
-  Project_Explanation.docx / .pdf
-  references/          # paper.txt + the original paper PDF
-  website/             # the interactive GitHub Pages site
+  references/             paper PDF and extracted paper text
+
+flowchart.txt             end-to-end simulator flowchart
+COMMANDS.txt              web and CLI command reference
 ```
 
----
+## Getting started
 
-## 4. Quick way to run it
+### Prerequisites
 
-**Interactive live simulator (browser UI):**
+- Linux with Docker
+- `clang`, `llvm`, `libbpf-dev`, `libelf-dev`, `pahole`
+- `linux-tools-common`, `linux-tools-generic`
+- `hping3`, `iperf3`
+
 ```bash
-make -C engine                 # build the filters (first time only)
-bash sim/start_ui.sh           # start the simulator
-# open http://localhost:8090  ->  click "Start UDP Flood", "Start SYN Flood",
-# or "Start Both Floods", then toggle the filter ON/OFF and watch live
+sudo apt update
+sudo apt install -y docker.io clang llvm libbpf-dev libelf-dev pahole \
+  linux-tools-common linux-tools-generic hping3 iperf3
+sudo usermod -aG docker "$USER"
 ```
 
-**Easiest — one command does everything:**
+Log out and back in after adding the Docker group, or run the scripts with
+`sudo`.
+
+### Build the eBPF filters
+
 ```bash
-make -C engine                    # build the filters (first time only)
-sudo bash testbed/demo.sh        # builds network, attaches filter, runs attacks, prints results
+make -C engine
 ```
 
-**Manual, step by step:**
+This produces `engine/udp_filter_kern.o`, `engine/syn_filter_kern.o`, and
+`engine/ddos_filter_kern.o`.
+
+### Create the testbed
+
 ```bash
-# 1. build the filters
-cd ~/Desktop/CN/engine && make
-
-# 2. build the fake network
-cd ~/Desktop/CN/testbed && sudo bash setup_testbed.sh
-
-# 3. put the combined filter on the victim
-sudo docker cp ~/Desktop/CN/engine/ddos_filter_kern.o victim:/tmp/ddos_filter_kern.o
-sudo docker exec victim bash -c '
-  BPF=$(ls /usr/lib/linux-tools/*/bpftool 2>/dev/null | head -1)
-  rm -rf /sys/fs/bpf/ddos
-  $BPF prog loadall /tmp/ddos_filter_kern.o /sys/fs/bpf/ddos
-  ip link set dev eth0 xdp pinned /sys/fs/bpf/ddos/xdp'
-
-# 4. start the controller
-cd ~/Desktop/CN/testbed && sudo bash start_controller.sh
-
-# 5. launch a UDP flood (attack)
-for i in 1 2 3 4; do sudo docker exec -d attacker hping3 -2 -p 5201 --flood 172.30.0.10; done
-
-# 6. read the drop counters
-sudo docker exec victim bash -c '$(ls /usr/lib/linux-tools/*/bpftool 2>/dev/null | head -1) map dump name stats_map'
+sudo bash testbed/setup_testbed.sh
 ```
 
----
+The testbed creates three containers on `172.30.0.0/24`:
 
-## 5. Things to keep in mind
+| Container | IP | Role |
+|---|---|---|
+| `victim` | 172.30.0.10 | Target, XDP attach point, `iperf3` server |
+| `attacker` | 172.30.0.20 | Generates UDP/SYN floods |
+| `benign` | 172.30.0.30 | Generates legitimate traffic |
 
-- The filter works in **native XDP** mode on the victim's fake network card.
-- On this 16-core computer, a ~100 Mbps flood doesn't fully use one core, so the CPU
-  number doesn't change much with the filter on/off. The big CPU saving the paper shows
-  appears on small devices (like a Raspberry Pi). The main result — the **~99% drop
-  rate** — reproduces perfectly here.
-- The limits (800 packets/s for UDP, 200 connections/s for SYN) are **fixed numbers**.
-  If a normal user sends faster than the limit, they would be wrongly blocked too. This
-  is a known weakness of the paper's simple design (see paper section 6.3).
+### Run the local web simulator
+
+```bash
+bash sim/start_ui.sh
+```
+
+Open **http://localhost:8090**. Use the UDP, SYN, or combined flood buttons,
+then toggle the XDP filter and watch the traffic, verdicts, and resource cards.
+
+### Run the CLI demo
+
+```bash
+sudo bash testbed/demo.sh
+```
+
+Runs UDP, SYN, and combined floods, then verifies that legitimate traffic is
+not dropped.
+
+### Generate the formal report
+
+```bash
+sudo bash testbed/report.sh
+```
+
+Runs each scenario with the filter off and on, prints drop rates, host CPU,
+victim CPU/memory model values, and optional GPU utilization. A shorter run can
+be requested with:
+
+```bash
+DURATION=8 bash testbed/report.sh
+```
+
+## How the filter works
+
+The combined filter uses two hash maps and one statistics map:
+
+```text
+rate_map   -> per-source UDP count + last timestamp
+syn_map    -> per-source SYN count + last timestamp
+stats_map  -> UDP/SYN total, dropped, and alert counters
+```
+
+For each protected packet:
+
+```text
+first packet from IP      -> create window with count = 1, XDP_PASS
+window older than 1 s     -> reset count = 1, XDP_PASS
+otherwise                 -> count += 1
+count above limit         -> XDP_DROP
+count at or below limit   -> XDP_PASS
+```
+
+Limits:
+
+```text
+UDP: 800 packets per second per source IP
+SYN: 200 SYN packets per second per source IP
+```
+
+The filter only handles IPv4 UDP and TCP SYN. Other traffic is allowed through
+to the normal Linux stack.
+
+## Dashboard and controller
+
+The local Python backend (`sim/ui_server.py`):
+
+- Starts and stops UDP/SYN/combined floods.
+- Loads, pins, attaches, and detaches the XDP program.
+- Reads NIC counters, application counters, and `stats_map`.
+- Computes per-second rates and PASS/DROP verdicts.
+- Displays optional GPU usage when `nvidia-smi` is available.
+- Models victim CPU and memory pressure from packets reaching the application.
+
+The controller (`controller/controller.py`) reads alert messages from
+`/sys/kernel/tracing/trace_pipe`, adds an `iptables` DROP rule for the attacker
+IP inside the victim, and appends the event to `results/alerts.log`.
+
+## Verification
+
+The repository has been checked with:
+
+- eBPF compilation via `make -C engine`.
+- Python syntax checks for the backend and controller.
+- Bash syntax checks for all testbed scripts.
+- Live UDP, SYN, and combined flood tests.
+- Web API and dashboard checks.
+- No leftover flood workers after stopping.
+- XDP detached after test completion.
+
+## Limitations
+
+- Thresholds are fixed; legitimate senders above the limit can be blocked.
+- IPv4 UDP and TCP SYN only; IPv6 and other protocols pass through.
+- No protection against source-IP spoofing.
+- Rate-based detection does not catch low-and-slow application-layer attacks.
+- CPU and memory resource cards are model estimates, not cgroup measurements.
+- The Docker testbed is an emulation, not a hardware IoT deployment.
+- GitHub Pages hosts a browser model only; the real eBPF/XDP path requires a
+  local Linux kernel and Docker.
+
+## References
+
+- A. Tolay, *eBPF-Based Real-Time DDoS Mitigation for IoT Edge Devices*,
+  arXiv:2508.00851, 2025. https://arxiv.org/abs/2508.00851
+- T. Høiland-Jørgensen et al., *The eXpress Data Path: Fast Programmable Packet
+  Processing in the Operating System Kernel*, CoNEXT 2018.
+- Local copy: `docs/references/`

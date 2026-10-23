@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Interactive eBPF/XDP DDoS mitigation simulator for UDP and SYN floods.">
+  <title>eBPF/XDP DDoS Mitigation Simulator</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="page">
+    <header class="hero">
+      <div>
+        <p class="eyebrow">Computer Networks Project</p>
+        <h1>eBPF/XDP DDoS Mitigation Simulator</h1>
+        <p class="lede">
+          An interactive model of per-source rate limiting for UDP and SYN floods.
+          Start an attack, toggle the XDP filter, and compare the traffic that reaches the victim.
+        </p>
+      </div>
+      <div class="hero-links">
+        <a class="button ghost" href="https://github.com/Ejajaka/computer-networks-project">View source</a>
+        <span class="tag">Browser demo</span>
+      </div>
+    </header>
+
+    <section class="notice" role="note">
+      <strong>Hosted demo.</strong>
+      This page models the same rate-limiter logic in JavaScript. The real eBPF/XDP filter,
+      Docker testbed, and kernel counters run locally with the commands in the repository.
+    </section>
+
+    <section class="panel controls-panel" aria-label="Simulator controls">
+      <div class="controls">
+        <button class="action udp" id="udpBtn" type="button">Start UDP flood</button>
+        <button class="action syn" id="synBtn" type="button">Start SYN flood</button>
+        <button class="action both" id="bothBtn" type="button">Start both floods</button>
+        <button class="action stop" id="stopBtn" type="button" disabled>Stop flood</button>
+        <button class="action filter" id="filterBtn" type="button">Filter: OFF</button>
+      </div>
+      <div class="statusline">
+        <span>Flood: <strong id="floodState">idle</strong></span>
+        <span>Countdown: <strong id="countdown">--</strong></span>
+        <span>Filter: <span class="pill off" id="filterPill">OFF</span></span>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="section-head">
+        <h2>Traffic</h2>
+        <p>Packets per second at the network card and at the application.</p>
+      </div>
+      <div class="grid metrics">
+        <article class="card">
+          <p class="label">Packets hitting NIC</p>
+          <p class="value blue" id="nicValue">--</p>
+          <p class="hint">before XDP</p>
+        </article>
+        <article class="card">
+          <p class="label">Packets reaching app</p>
+          <p class="value green" id="appValue">--</p>
+          <p class="hint">after XDP</p>
+        </article>
+        <article class="card">
+          <p class="label">Drop rate</p>
+          <p class="value red" id="dropValue">--</p>
+          <p class="hint">discarded at the NIC</p>
+        </article>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="section-head">
+        <h2>Rate-limiter verdicts</h2>
+        <p>UDP limit: 800 packets/s. SYN limit: 200 connection attempts/s.</p>
+      </div>
+      <div class="grid metrics four">
+        <article class="card">
+          <p class="label">UDP rate seen by XDP</p>
+          <p class="value blue" id="udpRate">--</p>
+          <p class="hint" id="udpHint">limit 800 pkt/s</p>
+        </article>
+        <article class="card">
+          <p class="label">UDP verdict</p>
+          <p class="value" id="udpState">--</p>
+          <p class="hint">PASS = forward, DROP = discard</p>
+        </article>
+        <article class="card">
+          <p class="label">SYN rate seen by XDP</p>
+          <p class="value blue" id="synRate">--</p>
+          <p class="hint" id="synHint">limit 200 /s</p>
+        </article>
+        <article class="card">
+          <p class="label">SYN verdict</p>
+          <p class="value" id="synState">--</p>
+          <p class="hint">PASS = forward, DROP = discard</p>
+        </article>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="section-head">
+        <h2>Victim resource load</h2>
+        <p>CPU and memory are model estimates based on packets reaching the application.</p>
+      </div>
+      <div class="grid metrics">
+        <article class="card">
+          <p class="label">CPU</p>
+          <p class="value blue" id="cpuValue">--</p>
+          <p class="hint" id="cpuHint">victim load model</p>
+        </article>
+        <article class="card">
+          <p class="label">Memory</p>
+          <p class="value blue" id="memValue">--</p>
+          <p class="hint" id="memHint">victim load model</p>
+        </article>
+        <article class="card">
+          <p class="label">GPU</p>
+          <p class="value muted" id="gpuValue">N/A</p>
+          <p class="hint">not used by this workload</p>
+        </article>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="section-head">
+        <h2>Live traffic</h2>
+        <p>Blue: NIC before XDP. Green: application after XDP.</p>
+      </div>
+      <div class="chart-card">
+        <canvas id="chart" height="220" aria-label="NIC and application packet rate chart"></canvas>
+      </div>
+    </section>
+
+    <section class="section info-grid">
+      <article class="info-card">
+        <h3>What the filter does</h3>
+        <p>
+          The XDP program parses IPv4 UDP and TCP SYN packets, keeps a one-second counter
+          for each source IP, and returns <code>XDP_DROP</code> above the configured limit.
+          Everything else passes to the normal Linux network stack.
+        </p>
+      </article>
+      <article class="info-card">
+        <h3>What this page models</h3>
+        <p>
+          Attack rate, XDP pass/drop behavior, the dashboard verdicts, and the victim
+          resource-load estimates. It does not execute eBPF or generate real packets.
+        </p>
+      </article>
+      <article class="info-card">
+        <h3>Run the real testbed</h3>
+        <p>
+          Build the filters with <code>make -C engine</code>, then run
+          <code>bash sim/start_ui.sh</code> for the local dashboard or
+          <code>sudo bash testbed/demo.sh</code> for the CLI report.
+        </p>
+      </article>
+    </section>
+
+    <footer class="footer">
+      <span>eBPF/XDP DDoS mitigation project</span>
+      <a href="https://github.com/Ejajaka/computer-networks-project">Repository</a>
+    </footer>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
