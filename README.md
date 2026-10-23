@@ -42,101 +42,52 @@ Measurements were taken in the local Docker testbed with `hping3` floods and
 ## Architecture
 
 ```text
-eBPF/XDP DDoS Mitigation - Architecture
-=======================================
+              +-----------------------------+
+              | Attacker                    |
+              | 172.30.0.20                 |
+              +--------------+--------------+
+                             |
+                       UDP / SYN flood
+                             v
+              +-----------------------------+
+              | Victim NIC (eth0)           |
+              | 172.30.0.10                 |
+              +--------------+--------------+
+                             |
+                             v
+              +---------------------------------+
+              | XDP filter                      |
+              | engine/ddos_filter_kern.o       |
+              |                                 |
+              | parse IPv4 -> UDP / TCP SYN     |
+              | per-source IP, 1 second window  |
+              | UDP limit: 800 packets/s        |
+              | SYN limit: 200 SYNs/s           |
+              +------+--------------------+-----+
+                     |                    |
+                below limit          above limit
+                     |                    |
+                     v                    v
+          +--------------------+ +------------------+
+          | XDP_PASS           | | XDP_DROP         |
+          +----------+---------+ +--------+---------+
+                     |                    |
+                     v                    v
+        +------------------------+                      packet discarded
+        | Linux stack + iperf3   |                      at the network card
+        +------------------------+
 
-Testbed topology
-----------------
 
-                         Docker network: ddos-net (172.30.0.0/24)
+Observability and control
+-------------------------
 
-  +----------------------+       UDP / SYN flood       +----------------------+
-  | Attacker             |---------------------------->| Victim               |
-  | 172.30.0.20          |                             | 172.30.0.10          |
-  +----------------------+                             | eth0                 |
-                                                       +----------+-----------+
-                                                                  |
-  +----------------------+       legitimate traffic              |
-  | Benign client        |---------------------------->          |
-  | 172.30.0.30          |                                       |
-  +----------------------+                                       |
-                                                                  v
+  XDP filter -- stats_map ------> sim/ui_server.py -- /api/state --> Browser dashboard
+  XDP filter -- bpf_printk -----> trace_pipe ------> controller/controller.py
+                                                         |
+                                                         +--> iptables DROP in victim
+                                                         +--> results/alerts.log
 
-Packet path
------------
-
-                                              +-----------------------------+
-                                              | XDP filter                  |
-                                              | engine/ddos_filter_kern.o   |
-                                              |                             |
-                                              | parse Ethernet + IPv4       |
-                                              | UDP branch / TCP SYN branch |
-                                              | per-source-IP 1 s window    |
-                                              | UDP limit: 800 packets/s    |
-                                              | SYN limit: 200 SYNs/s       |
-                                              +------+---------------+------+
-                                                     |               |
-                                           below limit               above limit
-                                                     |               |
-                                                     v               v
-                                             +-------------+   +-------------+
-                                             | XDP_PASS    |   | XDP_DROP    |
-                                             +------+------+   +------+------+
-                                                    |                 |
-                                                    v                 v
-                                          +-------------------+   discarded at
-                                          | Linux network     |   the network card
-                                          | stack + iperf3    |
-                                          +-------------------+
-
-Observability and response paths
---------------------------------
-
-  XDP filter
-      |
-      +--> stats_map (udp_total, udp_dropped, syn_total, syn_dropped)
-      |        |
-      |        v
-      |    sim/ui_server.py
-      |        |
-      |        v
-      |    Browser dashboard
-      |
-      +--> bpf_printk alert
-               |
-               v
-           trace_pipe
-               |
-               v
-           controller/controller.py
-               |
-               +--> iptables DROP rule in victim
-               |
-               +--> results/alerts.log
-
-Control path
-------------
-
-  Browser buttons
-      |
-      v
-  sim/ui_server.py
-      |
-      +--> start/stop hping3 flood workers in attacker
-      |
-      +--> load/pin/attach/detach XDP on victim eth0
-
-Component responsibilities
---------------------------
-
-  engine/ddos_filter_kern.c   real packet inspection and DROP/PASS decision
-  engine/Makefile             compiles C sources to eBPF objects
-  sim/ui_server.py            attack control, counter reading, dashboard backend
-  site/                       hosted browser model of the same rate limiter
-  testbed/setup_testbed.sh    creates the three-container testbed
-  testbed/demo.sh             CLI UDP + SYN + combined demonstration
-  testbed/report.sh           formal with/without-filter comparison
-  controller/controller.py    reads alerts and applies iptables blocks
+  Browser buttons --> sim/ui_server.py --> hping3 workers / XDP attach or detach
 ```
 
 ## Repository layout
