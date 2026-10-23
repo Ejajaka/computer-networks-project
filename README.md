@@ -1,9 +1,4 @@
 # eBPF/XDP Real-Time DDoS Detection and Mitigation
-
-[![Live Demo](https://img.shields.io/badge/Live%20Demo-GitHub%20Pages-2ea44f?logo=githubpages&logoColor=white)](https://ejajaka.github.io/computer-networks-project/)
-[![eBPF](https://img.shields.io/badge/eBPF-XDP-0ea5e9)](https://ebpf.io/)
-[![Paper](https://img.shields.io/badge/Paper-arXiv%3A2508.00851-b31b1b)](https://arxiv.org/abs/2508.00851)
-
 An eBPF/XDP testbed for detecting and dropping UDP and TCP SYN floods at the
 network driver, before packets reach the normal Linux networking stack. The
 project reproduces the UDP mitigation approach from Tolay (2025) and extends it
